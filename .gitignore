@@ -1,0 +1,6 @@
+*.o
+*.d
+*.txt
+*.sh
+*.bak
+bin/

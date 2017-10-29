@@ -1,0 +1,170 @@
+#include "cache.h"
+
+#define NOFFSETS 7
+#define DEGREE 4
+#define NLAYERS 4
+#define NENTRIES 64
+#define INDEXSIZE 6
+#define TAGSIZE 6
+
+#define MAXSCORE 31
+#define MAXROUND 127
+
+#define TRUNCATE(x,nbits) (((x) & ((1<<(nbits))-1)))
+#define SAMEPAGE(lineaddr1,lineaddr2) ((((lineaddr1) ^ (lineaddr2)) >> 6) == 0)
+
+unsigned short accessCount;
+
+const int offsets[NOFFSETS] = {-1, 1, 2, 3, 4, 5, 6};
+// const string str[NOFFSETS] = {"minus1", "plus1", "plus2", "plus3", "plus4", "plus5", "plus6"};
+
+struct Layer
+{
+    Layer() : offset(0) {}
+
+    int offset;
+    int score;
+    bool inserted;
+    uint64_t table[8][64];
+};
+
+Layer layers[NOFFSETS];
+
+int offset_list[4];
+
+int stack[4];
+
+int stack_pointer;
+
+void clearOffsetList()
+{
+    for (int i = 0; i < DEGREE; ++i) {
+        offset_list[i] = 0;
+    }
+    offset_list[0] = 1;
+}
+
+void clearLayerScore()
+{
+    for (int i = 0; i < NOFFSETS; ++i) {
+        layers[i].score = 0;
+        layers[i].inserted = false;
+    }
+}
+
+void clearStack()
+{
+    for (int i = 0; i < DEGREE; ++i) {
+        stack[i] = 0;
+    }
+    stack_pointer = 0;
+    accessCount = 0;
+
+    clearLayerScore();
+}
+
+void copyStack()
+{
+    for (int i = 0; i < DEGREE; ++i) {
+        offset_list[i] = stack[i];
+    }
+}
+
+void virtualPrefetch(uint64_t blkAddr, int num)
+{
+    uint64_t pf = blkAddr + layers[num].offset;
+    int index = TRUNCATE(pf, INDEXSIZE);
+    int layer = rand() % NLAYERS;
+    uint64_t tag = TRUNCATE(pf >> INDEXSIZE, TAGSIZE);
+
+    layers[num].table[layer][index] = tag;
+}
+
+void findTag(uint64_t blkAddr)
+{
+    int index = TRUNCATE(blkAddr, INDEXSIZE);
+    int tag = TRUNCATE(blkAddr >> INDEXSIZE, TAGSIZE);
+
+    for (int i = 0; i < NOFFSETS; ++i) {
+
+        for (int layer = 0; layer < NLAYERS; ++layer) {
+            if (layers[i].table[layer][index] == tag) {    //  find tag -> score up.
+                ++layers[i].score;
+            }
+        }
+
+        virtualPrefetch(blkAddr, i);
+
+        if (layers[i].score > MAXSCORE && layers[i].inserted == false) {
+            stack[stack_pointer] = layers[i].offset;
+            layers[i].inserted = true;
+            ++stack_pointer;
+        }
+
+        if (stack_pointer > DEGREE) {
+            copyStack();
+            clearStack();
+        }
+    }
+}
+
+void CACHE::l2c_prefetcher_initialize()
+{
+    cout << "L2C Layer Prefetcher" << endl;
+
+    for (int i = 0; i < NOFFSETS; ++i) {
+        layers[i].offset = offsets[i];
+        layers[i].score = 0;
+        layers[i].inserted = false;
+        for (int j = 0; j < NLAYERS; ++j) {
+            for (int k = 0; k < NENTRIES; ++k) {
+                layers[i].table[j][k] = 0;
+            }
+        }
+    }
+
+    accessCount = 0;
+
+    clearOffsetList();
+    clearStack();
+}
+
+void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type)
+{
+    uint64_t cl_address = addr >> LOG2_BLOCK_SIZE;
+
+    ++accessCount;
+
+    findTag(cl_address);
+
+    if (accessCount > MAXROUND) {
+        copyStack();
+        clearStack();
+    }
+
+    for (int i = 0; i < DEGREE; ++i) {
+        if (offset_list[i] != 0) {
+            if (SAMEPAGE(cl_address, cl_address + offset_list[i])) {
+                uint64_t pf_addr = (cl_address + offset_list[i]) << LOG2_BLOCK_SIZE;
+                if(MSHR.occupancy < 8)
+                {
+                    prefetch_line(ip, addr, pf_addr, FILL_L2);
+                }
+                else
+                {
+                    prefetch_line(ip, addr, pf_addr, FILL_LLC);
+                }
+            }
+        }
+    }
+}
+
+void CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr)
+{
+
+}
+
+void CACHE::l2c_prefetcher_final_stats()
+{
+    cout << endl << "L2C Layer Prefetcher final stats" << endl;
+}
