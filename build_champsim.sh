@@ -98,7 +98,7 @@ mv bin/champsim bin/${BINARY_NAME}
 # sed -i.bak 's/\<DRAM_CHANNELS 2\>/DRAM_CHANNELS 1/g' inc/champsim.h
 # sed -i.bak 's/\<DRAM_CHANNELS_LOG2 1\>/DRAM_CHANNELS_LOG2 0/g' inc/champsim.h
 
-cp inc/champsim.h.bak inc/champsim.h
+cp inc/champsim.h.1core inc/champsim.h
 
 cp branch/bimodal.bpred branch/branch_predictor.cc
 cp prefetcher/no.l1d_pref prefetcher/l1d_prefetcher.cc
