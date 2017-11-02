@@ -45,7 +45,7 @@ void CACHE::handle_fill()
             // check fill level
             if (MSHR.entry[mshr_index].fill_level < fill_level) {
 
-                if (MSHR.entry[mshr_index].instruction) 
+                if (MSHR.entry[mshr_index].instruction)
                     upper_level_icache[fill_cpu]->return_data(&MSHR.entry[mshr_index]);
                 else // data
                     upper_level_dcache[fill_cpu]->return_data(&MSHR.entry[mshr_index]);
@@ -134,14 +134,14 @@ void CACHE::handle_fill()
             // check fill level
             if (MSHR.entry[mshr_index].fill_level < fill_level) {
 
-                if (MSHR.entry[mshr_index].instruction) 
+                if (MSHR.entry[mshr_index].instruction)
                     upper_level_icache[fill_cpu]->return_data(&MSHR.entry[mshr_index]);
                 else // data
                     upper_level_dcache[fill_cpu]->return_data(&MSHR.entry[mshr_index]);
             }
 
             // update processed packets
-            if (cache_type == IS_ITLB) { 
+            if (cache_type == IS_ITLB) {
                 MSHR.entry[mshr_index].instruction_pa = block[set][way].data;
                 if (PROCESSED.occupancy < PROCESSED.SIZE)
                     PROCESSED.add_queue(&MSHR.entry[mshr_index]);
@@ -183,7 +183,7 @@ void CACHE::handle_writeback()
         // access cache
         uint32_t set = get_set(WQ.entry[index].address);
         int way = check_hit(&WQ.entry[index]);
-        
+
         if (way >= 0) { // writeback hit (or RFO hit for L1D)
 
             if (cache_type == IS_LLC) {
@@ -210,7 +210,7 @@ void CACHE::handle_writeback()
             // check fill level
             if (WQ.entry[index].fill_level < fill_level) {
 
-                if (WQ.entry[index].instruction) 
+                if (WQ.entry[index].instruction)
                     upper_level_icache[writeback_cpu]->return_data(&WQ.entry[index]);
                 else // data
                     upper_level_dcache[writeback_cpu]->return_data(&WQ.entry[index]);
@@ -223,7 +223,7 @@ void CACHE::handle_writeback()
             WQ.remove_queue(&WQ.entry[index]);
         }
         else { // writeback miss (or RFO miss for L1D)
-            
+
             DP ( if (warmup_complete[writeback_cpu]) {
             cout << "[" << NAME << "] " << __func__ << " type: " << +WQ.entry[index].type << " miss";
             cout << " instr_id: " << WQ.entry[index].instr_id << " address: " << hex << WQ.entry[index].address;
@@ -247,7 +247,7 @@ void CACHE::handle_writeback()
                 }
                 else {
                     if ((mshr_index == -1) && (MSHR.occupancy == MSHR_SIZE)) { // not enough MSHR resource
-                        
+
                         // cannot handle miss request until one of MSHRs is available
                         miss_handled = 0;
                         STALL[WQ.entry[index].type]++;
@@ -273,7 +273,7 @@ void CACHE::handle_writeback()
 
                         DP ( if (warmup_complete[writeback_cpu]) {
                         cout << "[" << NAME << "] " << __func__ << " mshr merged";
-                        cout << " instr_id: " << WQ.entry[index].instr_id << " prior_id: " << MSHR.entry[mshr_index].instr_id; 
+                        cout << " instr_id: " << WQ.entry[index].instr_id << " prior_id: " << MSHR.entry[mshr_index].instr_id;
                         cout << " address: " << hex << WQ.entry[index].address;
                         cout << " full_addr: " << WQ.entry[index].full_addr << dec;
                         cout << " cycle: " << WQ.entry[index].event_cycle << endl; });
@@ -316,7 +316,7 @@ void CACHE::handle_writeback()
                 if (block[set][way].dirty) {
 
                     // check if the lower level WQ has enough room to keep this writeback request
-                    if (lower_level) { 
+                    if (lower_level) {
                         if (lower_level->get_occupancy(2, block[set][way].address) == lower_level->get_size(2, block[set][way].address)) {
 
                             // lower level WQ is full, cannot replace this victim
@@ -329,7 +329,7 @@ void CACHE::handle_writeback()
                             cout << " lower level wq is full!" << " fill_addr: " << hex << WQ.entry[index].address;
                             cout << " victim_addr: " << block[set][way].tag << dec << endl; });
                         }
-                        else { 
+                        else {
                             PACKET writeback_packet;
 
                             writeback_packet.fill_level = fill_level << 1;
@@ -376,12 +376,12 @@ void CACHE::handle_writeback()
                     fill_cache(set, way, &WQ.entry[index]);
 
                     // mark dirty
-                    block[set][way].dirty = 1; 
+                    block[set][way].dirty = 1;
 
                     // check fill level
                     if (WQ.entry[index].fill_level < fill_level) {
 
-                        if (WQ.entry[index].instruction) 
+                        if (WQ.entry[index].instruction)
                             upper_level_icache[writeback_cpu]->return_data(&WQ.entry[index]);
                         else // data
                             upper_level_dcache[writeback_cpu]->return_data(&WQ.entry[index]);
@@ -414,7 +414,7 @@ void CACHE::handle_read()
             // access cache
             uint32_t set = get_set(RQ.entry[index].address);
             int way = check_hit(&RQ.entry[index]);
-            
+
             if (way >= 0) { // read hit
 
                 if (cache_type == IS_ITLB) {
@@ -427,7 +427,7 @@ void CACHE::handle_read()
                     if (PROCESSED.occupancy < PROCESSED.SIZE)
                         PROCESSED.add_queue(&RQ.entry[index]);
                 }
-                else if (cache_type == IS_STLB) 
+                else if (cache_type == IS_STLB)
                     RQ.entry[index].data = block[set][way].data;
                 else if (cache_type == IS_L1I) {
                     if (PROCESSED.occupancy < PROCESSED.SIZE)
@@ -441,10 +441,10 @@ void CACHE::handle_read()
 
                 // update prefetcher on load instruction
                 if (RQ.entry[index].type == LOAD) {
-                    if (cache_type == IS_L1D) 
+                    if (cache_type == IS_L1D)
                         l1d_prefetcher_operate(block[set][way].full_addr, RQ.entry[index].ip, 1, RQ.entry[index].type);
                     else if (cache_type == IS_L2C)
-                        l2c_prefetcher_operate(block[set][way].full_addr, RQ.entry[index].ip, 1, RQ.entry[index].type);
+                        l2c_prefetcher_operate(block[set][way].full_addr, RQ.entry[index].ip, 1, block[set][way].prefetch);
                 }
 
                 // update replacement policy
@@ -462,7 +462,7 @@ void CACHE::handle_read()
                 // check fill level
                 if (RQ.entry[index].fill_level < fill_level) {
 
-                    if (RQ.entry[index].instruction) 
+                    if (RQ.entry[index].instruction)
                         upper_level_icache[read_cpu]->return_data(&RQ.entry[index]);
                     else // data
                         upper_level_dcache[read_cpu]->return_data(&RQ.entry[index]);
@@ -477,7 +477,7 @@ void CACHE::handle_read()
 
                 HIT[RQ.entry[index].type]++;
                 ACCESS[RQ.entry[index].type]++;
-                
+
                 // remove this entry from RQ
                 RQ.remove_queue(&RQ.entry[index]);
             }
@@ -508,7 +508,7 @@ void CACHE::handle_read()
                             // emulate page table walk
                             uint64_t pa = va_to_pa(read_cpu, RQ.entry[index].instr_id, RQ.entry[index].full_addr, RQ.entry[index].address);
 
-                            RQ.entry[index].data = pa >> LOG2_PAGE_SIZE; 
+                            RQ.entry[index].data = pa >> LOG2_PAGE_SIZE;
                             RQ.entry[index].event_cycle = current_core_cycle[read_cpu];
                             return_data(&RQ.entry[index]);
                         }
@@ -516,7 +516,7 @@ void CACHE::handle_read()
                 }
                 else {
                     if ((mshr_index == -1) && (MSHR.occupancy == MSHR_SIZE)) { // not enough MSHR resource
-                        
+
                         // cannot handle miss request until one of MSHRs is available
                         miss_handled = 0;
                         STALL[RQ.entry[index].type]++;
@@ -534,7 +534,7 @@ void CACHE::handle_read()
                             }
 
                             if (RQ.entry[index].load_merged) {
-                                //uint32_t lq_index = RQ.entry[index].lq_index; 
+                                //uint32_t lq_index = RQ.entry[index].lq_index;
                                 MSHR.entry[mshr_index].load_merged = 1;
                                 //MSHR.entry[mshr_index].lq_index_depend_on_me[lq_index] = 1;
 				MSHR.entry[mshr_index].lq_index_depend_on_me.join (RQ.entry[index].lq_index_depend_on_me, LQ_SIZE);
@@ -557,7 +557,7 @@ void CACHE::handle_read()
                                     cout << " merged rob_index: " << i << " instr_id: N/A" << endl; });
                                 }
                             }
-                            else 
+                            else
                             {
                                 uint32_t lq_index = RQ.entry[index].lq_index;
                                 MSHR.entry[mshr_index].load_merged = 1;
@@ -583,7 +583,7 @@ void CACHE::handle_read()
                             uint8_t  prior_returned = MSHR.entry[mshr_index].returned;
                             uint64_t prior_event_cycle = MSHR.entry[mshr_index].event_cycle;
                             MSHR.entry[mshr_index] = RQ.entry[index];
-                            
+
                             // in case request is already returned, we should keep event_cycle and retunred variables
                             MSHR.entry[mshr_index].returned = prior_returned;
                             MSHR.entry[mshr_index].event_cycle = prior_event_cycle;
@@ -593,7 +593,7 @@ void CACHE::handle_read()
 
                         DP ( if (warmup_complete[read_cpu]) {
                         cout << "[" << NAME << "] " << __func__ << " mshr merged";
-                        cout << " instr_id: " << RQ.entry[index].instr_id << " prior_id: " << MSHR.entry[mshr_index].instr_id; 
+                        cout << " instr_id: " << RQ.entry[index].instr_id << " prior_id: " << MSHR.entry[mshr_index].instr_id;
                         cout << " address: " << hex << RQ.entry[index].address;
                         cout << " full_addr: " << RQ.entry[index].full_addr << dec;
                         cout << " cycle: " << RQ.entry[index].event_cycle << endl; });
@@ -607,7 +607,7 @@ void CACHE::handle_read()
                 if (miss_handled) {
                     // update prefetcher on load instruction
                     if (RQ.entry[index].type == LOAD) {
-                        if (cache_type == IS_L1D) 
+                        if (cache_type == IS_L1D)
                             l1d_prefetcher_operate(RQ.entry[index].full_addr, RQ.entry[index].ip, 0, RQ.entry[index].type);
                         if (cache_type == IS_L2C)
                             l2c_prefetcher_operate(RQ.entry[index].full_addr, RQ.entry[index].ip, 0, RQ.entry[index].type);
@@ -640,7 +640,7 @@ void CACHE::handle_prefetch()
             // access cache
             uint32_t set = get_set(PQ.entry[index].address);
             int way = check_hit(&PQ.entry[index]);
-            
+
             if (way >= 0) { // prefetch hit
 
                 // update replacement policy
@@ -658,7 +658,7 @@ void CACHE::handle_prefetch()
                 // check fill level
                 if (PQ.entry[index].fill_level < fill_level) {
 
-                    if (PQ.entry[index].instruction) 
+                    if (PQ.entry[index].instruction)
                         upper_level_icache[prefetch_cpu]->return_data(&PQ.entry[index]);
                     else // data
                         upper_level_dcache[prefetch_cpu]->return_data(&PQ.entry[index]);
@@ -666,7 +666,7 @@ void CACHE::handle_prefetch()
 
                 HIT[PQ.entry[index].type]++;
                 ACCESS[PQ.entry[index].type]++;
-                
+
                 // remove this entry from PQ
                 PQ.remove_queue(&PQ.entry[index]);
             }
@@ -699,7 +699,7 @@ void CACHE::handle_prefetch()
                                 // add it to MSHRs if this prefetch miss will be filled to this cache level
                                 if (PQ.entry[index].fill_level <= fill_level)
                                     add_mshr(&PQ.entry[index]);
-                                
+
                                 lower_level->add_rq(&PQ.entry[index]); // add it to the DRAM RQ
                             }
                         }
@@ -720,7 +720,7 @@ void CACHE::handle_prefetch()
                     if ((mshr_index == -1) && (MSHR.occupancy == MSHR_SIZE)) { // not enough MSHR resource
 
                         // TODO: should we allow prefetching with lower fill level at this case?
-                        
+
                         // cannot handle miss request until one of MSHRs is available
                         miss_handled = 0;
                         STALL[PQ.entry[index].type]++;
@@ -736,7 +736,7 @@ void CACHE::handle_prefetch()
 
                         DP ( if (warmup_complete[prefetch_cpu]) {
                         cout << "[" << NAME << "] " << __func__ << " mshr merged";
-                        cout << " instr_id: " << PQ.entry[index].instr_id << " prior_id: " << MSHR.entry[mshr_index].instr_id; 
+                        cout << " instr_id: " << PQ.entry[index].instr_id << " prior_id: " << MSHR.entry[mshr_index].instr_id;
                         cout << " address: " << hex << PQ.entry[index].address;
                         cout << " full_addr: " << PQ.entry[index].full_addr << dec << " fill_level: " << MSHR.entry[mshr_index].fill_level;
                         cout << " cycle: " << MSHR.entry[mshr_index].event_cycle << endl; });
@@ -778,13 +778,13 @@ void CACHE::operate()
 
 uint32_t CACHE::get_set(uint64_t address)
 {
-    return (uint32_t) (address & ((1 << lg2(NUM_SET)) - 1)); 
+    return (uint32_t) (address & ((1 << lg2(NUM_SET)) - 1));
 }
 
 uint32_t CACHE::get_way(uint64_t address, uint32_t set)
 {
     for (uint32_t way=0; way<NUM_WAY; way++) {
-        if (block[set][way].valid && (block[set][way].tag == address)) 
+        if (block[set][way].valid && (block[set][way].tag == address))
             return way;
     }
 
@@ -890,7 +890,7 @@ int CACHE::invalidate_entry(uint64_t inval_addr)
             match_way = way;
 
             DP ( if (warmup_complete[cpu]) {
-            cout << "[" << NAME << "] " << __func__ << " inval_addr: " << hex << inval_addr;  
+            cout << "[" << NAME << "] " << __func__ << " inval_addr: " << hex << inval_addr;
             cout << " tag: " << block[set][way].tag << " data: " << block[set][way].data << dec;
             cout << " set: " << set << " way: " << way << " lru: " << block[set][way].lru << " cycle: " << current_core_cycle[cpu] << endl; });
 
@@ -906,12 +906,12 @@ int CACHE::add_rq(PACKET *packet)
     // check for the latest wirtebacks in the write queue
     int wq_index = WQ.check_queue(packet);
     if (wq_index != -1) {
-        
+
         // check fill level
         if (packet->fill_level < fill_level) {
 
             packet->data = WQ.entry[wq_index].data;
-            if (packet->instruction) 
+            if (packet->instruction)
                 upper_level_icache[packet->cpu]->return_data(packet);
             else // data
                 upper_level_dcache[packet->cpu]->return_data(packet);
@@ -948,7 +948,7 @@ int CACHE::add_rq(PACKET *packet)
     // check for duplicates in the read queue
     int index = RQ.check_queue(packet);
     if (index != -1) {
-        
+
         if (packet->instruction) {
             uint32_t rob_index = packet->rob_index;
             RQ.entry[index].rob_index_depend_on_me.insert (rob_index);
@@ -958,7 +958,7 @@ int CACHE::add_rq(PACKET *packet)
             cout << "[INSTR_MERGED] " << __func__ << " cpu: " << packet->cpu << " instr_id: " << RQ.entry[index].instr_id;
             cout << " merged rob_index: " << rob_index << " instr_id: " << packet->instr_id << endl; });
         }
-        else 
+        else
         {
             // mark merged consumer
             if (packet->type == RFO) {
@@ -968,7 +968,7 @@ int CACHE::add_rq(PACKET *packet)
                 RQ.entry[index].store_merged = 1;
             }
             else {
-                uint32_t lq_index = packet->lq_index; 
+                uint32_t lq_index = packet->lq_index;
                 RQ.entry[index].lq_index_depend_on_me.insert (lq_index);
                 RQ.entry[index].load_merged = 1;
 
@@ -1088,7 +1088,7 @@ int CACHE::prefetch_line(uint64_t ip, uint64_t base_addr, uint64_t pf_addr, int 
 
     if (PQ.occupancy < PQ.SIZE) {
         if ((base_addr>>LOG2_PAGE_SIZE) == (pf_addr>>LOG2_PAGE_SIZE)) {
-            
+
             PACKET pf_packet;
             pf_packet.fill_level = fill_level;
             pf_packet.cpu = cpu;
@@ -1118,7 +1118,7 @@ int CACHE::kpc_prefetch_line(uint64_t base_addr, uint64_t pf_addr, int fill_leve
 {
     if (PQ.occupancy < PQ.SIZE) {
         if ((base_addr>>LOG2_PAGE_SIZE) == (pf_addr>>LOG2_PAGE_SIZE)) {
-            
+
             PACKET pf_packet;
             pf_packet.fill_level = fill_level;
             pf_packet.cpu = cpu;
@@ -1153,12 +1153,12 @@ int CACHE::add_pq(PACKET *packet)
     // check for the latest wirtebacks in the write queue
     int wq_index = WQ.check_queue(packet);
     if (wq_index != -1) {
-        
+
         // check fill level
         if (packet->fill_level < fill_level) {
 
             packet->data = WQ.entry[wq_index].data;
-            if (packet->instruction) 
+            if (packet->instruction)
                 upper_level_icache[packet->cpu]->return_data(packet);
             else // data
                 upper_level_dcache[packet->cpu]->return_data(packet);
@@ -1288,7 +1288,7 @@ void CACHE::update_fill_cycle()
         cout << " index: " << i << " occupancy: " << MSHR.occupancy;
         cout << " event: " << MSHR.entry[i].event_cycle << " current: " << current_core_cycle[MSHR.entry[i].cpu] << " next: " << MSHR.next_fill_cycle << endl; });
     }
-    
+
     MSHR.next_fill_cycle = min_cycle;
     MSHR.next_fill_index = min_index;
     if (min_index < MSHR.SIZE) {
@@ -1306,7 +1306,7 @@ int CACHE::check_mshr(PACKET *packet)
     // search mshr
     for (uint32_t index=0; index<MSHR_SIZE; index++) {
         if (MSHR.entry[index].address == packet->address) {
-            
+
             DP ( if (warmup_complete[packet->cpu]) {
             cout << "[" << NAME << "_MSHR] " << __func__ << " same entry instr_id: " << packet->instr_id << " prior_id: " << MSHR.entry[index].instr_id;
             cout << " address: " << hex << packet->address;
@@ -1320,7 +1320,7 @@ int CACHE::check_mshr(PACKET *packet)
     cout << "[" << NAME << "_MSHR] " << __func__ << " new address: " << hex << packet->address;
     cout << " full_addr: " << packet->full_addr << dec << endl; });
 
-    DP ( if (warmup_complete[packet->cpu] && (MSHR.occupancy == MSHR_SIZE)) { 
+    DP ( if (warmup_complete[packet->cpu] && (MSHR.occupancy == MSHR_SIZE)) {
     cout << "[" << NAME << "_MSHR] " << __func__ << " mshr is full";
     cout << " instr_id: " << packet->instr_id << " mshr occupancy: " << MSHR.occupancy;
     cout << " address: " << hex << packet->address;
@@ -1337,7 +1337,7 @@ void CACHE::add_mshr(PACKET *packet)
     // search mshr
     for (index=0; index<MSHR_SIZE; index++) {
         if (MSHR.entry[index].address == 0) {
-            
+
             MSHR.entry[index] = *packet;
             MSHR.entry[index].returned = INFLIGHT;
             MSHR.occupancy++;
