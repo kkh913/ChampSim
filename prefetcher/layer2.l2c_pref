@@ -88,11 +88,19 @@ void increaseLifeTime(int layer, int index) {
   }
 }
 
+uint8_t layer_tag(uint64_t lineaddr) {
+  return TRUNCATE(lineaddr >> INDEXSIZE, TAGSIZE);
+}
+
+int layer_index(uint64_t lineaddr) {
+  return TRUNCATE(lineaddr ^ (lineaddr >> INDEXSIZE), INDEXSIZE);
+}
+
 void virtualPrefetch(uint64_t blkAddr, int num) {
   uint64_t pf = blkAddr + layers[num].offset;
-  int index = TRUNCATE(pf, INDEXSIZE);
+  int index = layer_index(pf);
   int layer = rand() % NLAYERS;
-  uint8_t tag = TRUNCATE(pf >> INDEXSIZE, TAGSIZE);
+  uint8_t tag = layer_tag(pf);
 
   if (layers[num].table[layer][index] != tag) { // replacement event
     ++sampledTags;
@@ -108,8 +116,8 @@ void virtualPrefetch(uint64_t blkAddr, int num) {
 }
 
 void findTag(uint64_t blkAddr) {
-  int index = TRUNCATE(blkAddr, INDEXSIZE);
-  uint8_t tag = TRUNCATE(blkAddr >> INDEXSIZE, TAGSIZE);
+  int index = layer_index(blkAddr);
+  uint8_t tag = layer_tag(blkAddr);
 
   for (int i = 0; i < NOFFSETS; ++i) {
 
@@ -117,7 +125,8 @@ void findTag(uint64_t blkAddr) {
       if (layers[i].table[layer][index] == tag) { //  find tag -> score up.
         ++totalLayerHits;
         if (layers[i].real_addr[layer][index] != blkAddr) {
-          printf("real_addr %llx blkAddr %llx \n", layers[i].real_addr[layer][index], blkAddr);
+          printf("real_addr %llx blkAddr %llx \n",
+                 layers[i].real_addr[layer][index], blkAddr);
           ++totalFalsePositive;
         }
         ++layers[i].score;

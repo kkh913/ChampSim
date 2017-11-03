@@ -70,20 +70,12 @@ void CACHE::l2c_prefetcher_initialize() {
   prefetch_offset = DEFAULT_OFFSET;
   rr_init();
   os_reset();
-  for (int i = 0; i < NOFFSETS; ++i) {
-    totalUsedOffset[i] = 0;
-  }
-  totalLifeTime = 0;
-  sampledTags = 0;
-  totalRRHits = 0;
-  totalRRMisses = 0;
-  totalFalsePositive = 0;
 }
 
 void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip,
                                    uint8_t cache_hit, uint8_t type) {
   uint64_t cl_address = addr >> LOGLINE;
-  
+
   if (cache_hit == 0 ||                // cache miss
       (cache_hit == 1 && type == 1)) { //  prefetched hit
 
@@ -115,6 +107,8 @@ void CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way,
 }
 
 void CACHE::l2c_prefetcher_final_stats() {
+  cout << endl << "L2C BO Prefetcher final stats" << endl;
+
   for (int i = 0; i < NOFFSETS; ++i) {
     cout << "CPU" << cpu << " Number of used offset " << OFFSET[i] << " : "
          << totalUsedOffset[i] << endl;
@@ -126,8 +120,11 @@ void CACHE::l2c_prefetcher_final_stats() {
        << " Average of tag life : " << (double)totalLifeTime / sampledTags
        << endl;
 
-  cout << "CPU" << cpu << " Total of rr table hits : " << totalRRHits << endl;
-  cout << "CPU" << cpu << " Total of rr table misses : " << totalRRMisses
+  cout << "CPU" << cpu << " Total number of rr table hits : " << totalRRHits
+       << endl;
+  cout << "CPU" << cpu << " Total number of rr table misses : " << totalRRMisses
+       << endl;
+  cout << "CPU" << cpu << " Total number of false positive : " << totalFalsePositive
        << endl;
 }
 
@@ -171,7 +168,7 @@ bool rr_hit(uint64_t lineaddr) {
   int tag = rr_tag(lineaddr);
   bool ret = recent_request[i] == tag;
 
-  if (ret) { //  RR hit
+  if (ret) { //  RR hit    
     if (real_addr[i] != lineaddr) {
       ++totalFalsePositive;
     }
@@ -242,7 +239,7 @@ void recordOffsetStats() {
 }
 
 void increaseLifeTime() {
-  for (int i = 0; i < 1 << RRINDEX; ++i) {
+  for (int i = 0; i < (1 << RRINDEX); ++i) {
     if (recent_request[i] != 0) {
       ++tag_life[i];
     }
