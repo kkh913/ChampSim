@@ -34,9 +34,9 @@ struct Layer {
 
 Layer layers[NOFFSETS];
 
-int offset_list[4];
+int offset_list[DEGREE];
 
-int stack[4];
+int stack[DEGREE];
 
 int stack_pointer;
 
@@ -124,9 +124,7 @@ void findTag(uint64_t blkAddr) {
     for (int layer = 0; layer < NLAYERS; ++layer) {
       if (layers[i].table[layer][index] == tag) { //  find tag -> score up.
         ++totalLayerHits;
-        if (layers[i].real_addr[layer][index] != blkAddr) {
-          printf("real_addr %llx blkAddr %llx \n",
-                 layers[i].real_addr[layer][index], blkAddr);
+        if (layers[i].real_addr[layer][index] != blkAddr) {          
           ++totalFalsePositive;
         }
         ++layers[i].score;
