@@ -89,12 +89,11 @@ void increaseLifeTime(int layer, int index) {
 }
 
 uint8_t layer_tag(uint64_t lineaddr) {
-  return TRUNCATE(lineaddr >> INDEXSIZE, TAGSIZE);
+  return TRUNCATE((lineaddr >> INDEXSIZE) ^ (lineaddr >> (TAGSIZE + INDEXSIZE)),
+                  TAGSIZE);
 }
 
-int layer_index(uint64_t lineaddr) {
-  return TRUNCATE(lineaddr ^ (lineaddr >> INDEXSIZE), INDEXSIZE);
-}
+int layer_index(uint64_t lineaddr) { return TRUNCATE(lineaddr, INDEXSIZE); }
 
 void virtualPrefetch(uint64_t blkAddr, int num) {
   uint64_t pf = blkAddr + layers[num].offset;
@@ -124,7 +123,7 @@ void findTag(uint64_t blkAddr) {
     for (int layer = 0; layer < NLAYERS; ++layer) {
       if (layers[i].table[layer][index] == tag) { //  find tag -> score up.
         ++totalLayerHits;
-        if (layers[i].real_addr[layer][index] != blkAddr) {          
+        if (layers[i].real_addr[layer][index] != blkAddr) {
           ++totalFalsePositive;
         }
         ++layers[i].score;
