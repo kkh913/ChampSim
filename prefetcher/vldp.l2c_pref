@@ -68,7 +68,7 @@ int MAX_DEGREE_PREFETCHED = 3;
 
 #define MAX_SAT_VALUE 4
 
-#define NUM_PROCS 1
+#define NUM_PROCS 4
 #define NUM_PAGE_BITS 12
 #define VLDP_DEBUG 0
 
