@@ -13,7 +13,7 @@
 #define TRUNCATE(x, nbits) (((x) & ((1 << (nbits)) - 1)))
 #define SAMEPAGE(lineaddr1, lineaddr2) ((((lineaddr1) ^ (lineaddr2)) >> 6) == 0)
 
-uint16_t accessCount;
+uint16_t accessCount[NUM_CPUS];
 
 const int offsets[NOFFSETS] = {-1, 1, 2, 3, 4, 5, 6};
 // const string str[NOFFSETS] = {"minus1", "plus1", "plus2", "plus3", "plus4",
@@ -32,116 +32,116 @@ struct Layer {
   uint64_t life_time[NLAYERS][NENTRIES];
 };
 
-Layer layers[NOFFSETS];
+Layer layers[NUM_CPUS][NOFFSETS];
 
-int offset_list[DEGREE];
+int offset_list[NUM_CPUS][DEGREE];
 
-int stack[DEGREE];
+int stack[NUM_CPUS][DEGREE];
 
-int stack_pointer;
+int stack_pointer[NUM_CPUS];
 
-uint64_t totalUsedOffset[NOFFSETS];
-uint64_t totalLayerHits;
-uint64_t totalFalsePositive;
-uint64_t totalLifeTime;
-uint64_t sampledTags;
+uint64_t totalUsedOffset[NUM_CPUS][NOFFSETS];
+uint64_t totalLayerHits[NUM_CPUS];
+uint64_t totalFalsePositive[NUM_CPUS];
+uint64_t totalLifeTime[NUM_CPUS];
+uint64_t sampledTags[NUM_CPUS];
 
-void clearOffsetList() {
+void clearOffsetList(uint8_t cpu) {
   for (int i = 0; i < DEGREE; ++i) {
-    offset_list[i] = 0;
+    offset_list[cpu][i] = 0;
   }
-  offset_list[0] = 1;
+  offset_list[cpu][0] = 1;
 }
 
-void clearLayerScore() {
+void clearLayerScore(uint8_t cpu) {
   for (int i = 0; i < NOFFSETS; ++i) {
-    layers[i].score = 0;
-    layers[i].inserted = false;
+    layers[cpu][i].score = 0;
+    layers[cpu][i].inserted = false;
   }
 }
 
-void clearStack() {
+void clearStack(uint8_t cpu) {
   for (int i = 0; i < DEGREE; ++i) {
-    stack[i] = 0;
+    stack[cpu][i] = 0;
   }
-  stack_pointer = 0;
-  accessCount = 0;
+  stack_pointer[cpu] = 0;
+  accessCount[cpu] = 0;
 
-  clearLayerScore();
+  clearLayerScore(cpu);
 }
 
-void copyStack() {
+void copyStack(uint8_t cpu) {
   for (int i = 0; i < DEGREE; ++i) {
-    offset_list[i] = stack[i];
+    offset_list[cpu][i] = stack[cpu][i];
   }
 }
 
-void increaseLifeTime(int layer, int index) {
+void increaseLifeTime(uint8_t cpu, int layer, int index) {
   for (int i = 0; i < NOFFSETS; ++i) {
     for (int j = 0; j < NLAYERS; ++j) {
       for (int k = 0; k < NENTRIES; ++k) {
-        if (layers[i].table[j][k] && j != layer && k != index) {
-          ++layers[i].life_time[j][k];
+        if (layers[cpu][i].table[j][k] && j != layer && k != index) {
+          ++layers[cpu][i].life_time[j][k];
         }
       }
     }
   }
 }
 
-void virtualPrefetch(uint64_t blkAddr, int num) {
-  uint64_t pf = blkAddr + layers[num].offset;
+void virtualPrefetch(uint8_t cpu, uint64_t blkAddr, int num) {
+  uint64_t pf = blkAddr + layers[cpu][num].offset;
   int index = TRUNCATE(pf, INDEXSIZE);
   int layer = rand() % NLAYERS;
   uint8_t tag = TRUNCATE(pf >> INDEXSIZE, TAGSIZE);
 
-  if (layers[num].table[layer][index] != tag) { // replacement event
-    ++sampledTags;
-    totalLifeTime += layers[num].life_time[layer][index];
-    layers[num].life_time[layer][index] = 0;
-    increaseLifeTime(layer, index);
+  if (layers[cpu][num].table[layer][index] != tag) { // replacement event
+    ++sampledTags[cpu];
+    totalLifeTime[cpu] += layers[cpu][num].life_time[layer][index];
+    layers[cpu][num].life_time[layer][index] = 0;
+    increaseLifeTime(cpu, layer, index);
   } else {
-    increaseLifeTime(-1, -1);
+    increaseLifeTime(cpu, -1, -1);
   }
 
-  layers[num].table[layer][index] = tag;
-  layers[num].real_addr[layer][index] = pf;
+  layers[cpu][num].table[layer][index] = tag;
+  layers[cpu][num].real_addr[layer][index] = pf;
 }
 
-void findTag(uint64_t blkAddr) {
+void findTag(uint8_t cpu, uint64_t blkAddr) {
   int index = TRUNCATE(blkAddr, INDEXSIZE);
   uint8_t tag = TRUNCATE(blkAddr >> INDEXSIZE, TAGSIZE);
 
   for (int i = 0; i < NOFFSETS; ++i) {
 
     for (int layer = 0; layer < NLAYERS; ++layer) {
-      if (layers[i].table[layer][index] == tag) { //  find tag -> score up.
-        ++totalLayerHits;
-        if (layers[i].real_addr[layer][index] != blkAddr) {
-          ++totalFalsePositive;
+      if (layers[cpu][i].table[layer][index] == tag) { //  find tag -> score up.
+        ++totalLayerHits[cpu];
+        if (layers[cpu][i].real_addr[layer][index] != blkAddr) {
+          ++totalFalsePositive[cpu];
         }
-        ++layers[i].score;
+        ++layers[cpu][i].score;
       }
     }
 
-    virtualPrefetch(blkAddr, i);
+    virtualPrefetch(cpu, blkAddr, i);
 
-    if (layers[i].score > MAXSCORE && layers[i].inserted == false) {
-      stack[stack_pointer] = layers[i].offset;
-      layers[i].inserted = true;
-      ++stack_pointer;
+    if (layers[cpu][i].score > MAXSCORE && layers[cpu][i].inserted == false) {
+      stack[cpu][stack_pointer[cpu]] = layers[cpu][i].offset;
+      layers[cpu][i].inserted = true;
+      ++stack_pointer[cpu];
     }
 
-    if (stack_pointer > DEGREE) {
-      copyStack();
-      clearStack();
+    if (stack_pointer[cpu] > DEGREE) {
+      copyStack(cpu);
+      clearStack(cpu);
     }
   }
 }
 
-void recordOffsetStats(int offset) {
+void recordOffsetStats(uint8_t cpu, int offset) {
   for (int i = 0; i < NOFFSETS; ++i) {
     if (offsets[i] == offset) {
-      ++totalUsedOffset[i];
+      ++totalUsedOffset[cpu][i];
       break;
     }
   }
@@ -151,42 +151,42 @@ void CACHE::l2c_prefetcher_initialize() {
   cout << "L2C Layer Prefetcher" << endl;
 
   for (int i = 0; i < NOFFSETS; ++i) {
-    layers[i].offset = offsets[i];
-    layers[i].score = 0;
-    layers[i].inserted = false;
+    layers[cpu][i].offset = offsets[i];
+    layers[cpu][i].score = 0;
+    layers[cpu][i].inserted = false;
     for (int j = 0; j < NLAYERS; ++j) {
       for (int k = 0; k < NENTRIES; ++k) {
-        layers[i].table[j][k] = 0;
-        layers[i].real_addr[j][k] = 0;
-        layers[i].life_time[j][k] = 0;
+        layers[cpu][i].table[j][k] = 0;
+        layers[cpu][i].real_addr[j][k] = 0;
+        layers[cpu][i].life_time[j][k] = 0;
       }
     }
   }
 
-  accessCount = 0;
+  accessCount[cpu] = 0;
 
-  clearOffsetList();
-  clearStack();
+  clearOffsetList(cpu);
+  clearStack(cpu);
 }
 
 void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip,
                                    uint8_t cache_hit, uint8_t type) {
   uint64_t cl_address = addr >> LOG2_BLOCK_SIZE;
 
-  ++accessCount;
+  ++accessCount[cpu];
 
-  findTag(cl_address);
+  findTag(cpu, cl_address);
 
-  if (accessCount > MAXROUND) {
-    copyStack();
-    clearStack();
+  if (accessCount[cpu] > MAXROUND) {
+    copyStack(cpu);
+    clearStack(cpu);
   }
 
   for (int i = 0; i < DEGREE; ++i) {
-    if (offset_list[i] != 0) {
-      if (SAMEPAGE(cl_address, cl_address + offset_list[i])) {
-        recordOffsetStats(offset_list[i]);
-        uint64_t pf_addr = (cl_address + offset_list[i]) << LOG2_BLOCK_SIZE;
+    if (offset_list[cpu][i] != 0) {
+      if (SAMEPAGE(cl_address, cl_address + offset_list[cpu][i])) {
+        recordOffsetStats(cpu, offset_list[cpu][i]);
+        uint64_t pf_addr = (cl_address + offset_list[cpu][i]) << LOG2_BLOCK_SIZE;
         if (MSHR.occupancy < 8) {
           prefetch_line(ip, addr, pf_addr, FILL_L2);
         } else {
@@ -205,15 +205,15 @@ void CACHE::l2c_prefetcher_final_stats() {
   cout << endl << "L2C Layer Prefetcher final stats" << endl;
   for (int i = 0; i < NOFFSETS; ++i) {
     cout << "CPU" << cpu << " Number of used offset " << offsets[i] << " : "
-         << totalUsedOffset[i] << endl;
+         << totalUsedOffset[cpu][i] << endl;
   }
   cout << "CPU" << cpu
-       << " Total number of hits in layer sets : " << totalLayerHits << endl;
+       << " Total number of hits in layer sets : " << totalLayerHits[cpu] << endl;
   cout << "CPU" << cpu
-       << " Total number of false positive : " << totalFalsePositive << endl;
-  cout << "CPU" << cpu << " Total of tag life : " << totalLifeTime << endl;
-  cout << "CPU" << cpu << " Number of evicted tags : " << sampledTags << endl;
+       << " Total number of false positive : " << totalFalsePositive[cpu] << endl;
+  cout << "CPU" << cpu << " Total of tag life : " << totalLifeTime[cpu] << endl;
+  cout << "CPU" << cpu << " Number of evicted tags : " << sampledTags[cpu] << endl;
   cout << "CPU" << cpu
-       << " Average of tag life : " << (double)totalLifeTime / sampledTags
+       << " Average of tag life : " << (double)totalLifeTime[cpu] / sampledTags[cpu]
        << endl;
 }
