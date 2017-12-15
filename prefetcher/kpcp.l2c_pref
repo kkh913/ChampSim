@@ -10,7 +10,7 @@
 #define GC_MAX ((1<<GC_WIDTH)-1)
 
 // defined at kpcp_util.cc
-/* 
+/*
 SIGNATURE_TABLE L2_ST[NUM_CPUS][L2_ST_SET][L2_ST_WAY];
 PATTERN_TABLE L2_PT[NUM_CPUS][L2_PT_SET][L2_PT_WAY];
 GLOBAL_HISTORY_REGISTER L2_GHR[NUM_CPUS][L2_GHR_TRACK];
@@ -46,7 +46,38 @@ class PF_buffer {
 };
 PF_buffer pf_buffer[NUM_CPUS][L2C_MSHR_SIZE];
 
-void CACHE::l2c_prefetcher_initialize() 
+#define NOFFSETS 128
+const int offsets[NOFFSETS] = {
+
+    -64, -63, -62, -61, -60, -59, -58, -57, -56, -55, -54, -53, -52, -51, -50,
+    -49, -48, -47, -46, -45, -44, -43, -42, -41, -40, -39, -38, -37, -36, -35,
+    -34, -33, -32, -31, -30, -29, -28, -27, -26, -25, -24, -23, -22, -21, -20,
+    -19, -18, -17, -16, -15, -14, -13, -12, -11, -10, -9,  -8,  -7,  -6,  -5,
+    -4,  -3,  -2,  -1,  1,   2,   3,   4,   5,   6,   7,   8,   9,   10,  11,
+    12,  13,  14,  15,  16,  17,  18,  19,  20,  21,  22,  23,  24,  25,  26,
+    27,  28,  29,  30,  31,  32,  33,  34,  35,  36,  37,  38,  39,  40,  41,
+    42,  43,  44,  45,  46,  47,  48,  49,  50,  51,  52,  53,  54,  55,  56,
+    57,  58,  59,  60,  61,  62,  63,  64
+
+};
+
+uint64_t histoPrefetchDegree[NUM_CPUS][L2C_MSHR_SIZE+1];
+uint64_t totalUsedOffset[NUM_CPUS][NOFFSETS];
+
+void recordOffsetStats(uint8_t cpu, int offset) {
+  for (int i = 0; i < NOFFSETS; ++i) {
+    if (offsets[i] == offset) {
+      ++totalUsedOffset[cpu][i];
+      break;
+    }
+  }
+}
+
+void recordPrefetchDegree(uint8_t cpu, int degree) {
+  ++histoPrefetchDegree[cpu][degree];
+}
+
+void CACHE::l2c_prefetcher_initialize()
 {
     cout << "L2C Signature Path Prefetcher" << endl;
 
@@ -145,7 +176,7 @@ int PF_check(uint32_t cpu, int signature, int curr_block)
 {
     int l2_pt_idx = signature % pt_prime; //L2_PT_PRIME;
     PATTERN_TABLE *table = L2_PT[cpu][l2_pt_idx];
-    int pf_max = 0, pf_idx = -1, conf_max = 100, temp_conf = 100; 
+    int pf_max = 0, pf_idx = -1, conf_max = 100, temp_conf = 100;
 
     if (table[0].c_sig) // This signature was updated at least once
     {
@@ -166,7 +197,7 @@ int PF_check(uint32_t cpu, int signature, int curr_block)
 
                     if (warmup_complete[cpu])
                     L2_PF_DEBUG(printf("PF_buffer cpu: %d idx: %d delta: %d signature: %x depth: %d conf: %d\n",
-                                cpu, 0, pf_buffer[cpu][num_pf[cpu]].delta, pf_buffer[cpu][num_pf[cpu]].signature, 
+                                cpu, 0, pf_buffer[cpu][num_pf[cpu]].delta, pf_buffer[cpu][num_pf[cpu]].signature,
                                 pf_buffer[cpu][num_pf[cpu]].depth, pf_buffer[cpu][num_pf[cpu]].conf));
 
                     num_pf[cpu]++;
@@ -175,7 +206,7 @@ int PF_check(uint32_t cpu, int signature, int curr_block)
                 {
                     out_of_page[cpu]++;
                     if (warmup_complete[cpu])
-                    L2_PF_DEBUG(printf("PT_sig: %4x PF_check OOP high_curr_conf: %d  way: %d  delta: %d  counter: %d / %d  MAX_CONF: %d\n", 
+                    L2_PF_DEBUG(printf("PT_sig: %4x PF_check OOP high_curr_conf: %d  way: %d  delta: %d  counter: %d / %d  MAX_CONF: %d\n",
                                 signature, temp_conf, i, table[i].delta, table[i].c_delta, table[0].c_sig, MAX_CONF[cpu]));
 
                     #ifdef L2_GHR_ON
@@ -191,14 +222,14 @@ int PF_check(uint32_t cpu, int signature, int curr_block)
                     conf_max = temp_conf;
                 }
                 if (warmup_complete[cpu])
-                L2_PF_DEBUG(printf("PT_sig: %4x PF_check candidate  high_curr_conf: %d  way: %d  delta: %d  counter: %d / %d  MAX_CONF: %d\n", 
+                L2_PF_DEBUG(printf("PT_sig: %4x PF_check candidate  high_curr_conf: %d  way: %d  delta: %d  counter: %d / %d  MAX_CONF: %d\n",
                             signature, temp_conf, i, table[i].delta, table[i].c_delta, table[i].c_sig, MAX_CONF[cpu]));
             }
             else
             {
                 not_enough_conf[cpu]++;
                 if (warmup_complete[cpu])
-                L2_PF_DEBUG(printf("PT_sig: %4x PF_check no candidate  low_curr_conf: %d  way: %d  stride: %d  counter: %d / %d  MAX_CONF: %d\n", 
+                L2_PF_DEBUG(printf("PT_sig: %4x PF_check no candidate  low_curr_conf: %d  way: %d  stride: %d  counter: %d / %d  MAX_CONF: %d\n",
                             signature, temp_conf, i, table[i].delta, table[i].c_delta, table[i].c_sig, MAX_CONF[cpu]));
             }
         }
@@ -229,7 +260,7 @@ int PF_check(uint32_t cpu, int signature, int curr_block)
     {
         do
         {
-            la_signature = get_new_signature(la_signature, curr_delta[cpu] - last_delta); 
+            la_signature = get_new_signature(la_signature, curr_delta[cpu] - last_delta);
             la_pf_max = 0; la_pf_idx = -1;
             LA_idx = la_signature % pt_prime; //L2_PT_PRIME;
             table = L2_PT[cpu][LA_idx];
@@ -240,7 +271,7 @@ int PF_check(uint32_t cpu, int signature, int curr_block)
                 for (int i=0; i<L2_PT_WAY; i++)
                 {
                     // Calculate path confidence
-                    temp_conf = curr_conf[cpu]*table[i].c_delta/table[0].c_sig*MAX_CONF[cpu]/100; 
+                    temp_conf = curr_conf[cpu]*table[i].c_delta/table[0].c_sig*MAX_CONF[cpu]/100;
 
                     if (temp_conf >= PF_THRESHOLD) // This delta entry has enough confidence
                     {
@@ -252,20 +283,20 @@ int PF_check(uint32_t cpu, int signature, int curr_block)
                             conf_max = temp_conf;
                         }
                         if (warmup_complete[cpu])
-                        L2_PF_DEBUG(printf("PT_sig: %4x LA_check candidate  high_curr_conf: %d  way: %d  stride: %d  counter: %d / %d  MAX_CONF: %d\n", 
+                        L2_PF_DEBUG(printf("PT_sig: %4x LA_check candidate  high_curr_conf: %d  way: %d  stride: %d  counter: %d / %d  MAX_CONF: %d\n",
                                     la_signature, temp_conf, i, table[i].delta, table[i].c_delta, table[0].c_sig, MAX_CONF[cpu]));
                     }
                     else
                     {
                         not_enough_conf[cpu]++;
                         if (warmup_complete[cpu])
-                        L2_PF_DEBUG(printf("PT_sig: %4x LA_check no candidate  low_curr_conf: %d  way: %d  stride: %d  counter: %d / %d  MAX_CONF: %d\n", 
+                        L2_PF_DEBUG(printf("PT_sig: %4x LA_check no candidate  low_curr_conf: %d  way: %d  stride: %d  counter: %d / %d  MAX_CONF: %d\n",
                                     la_signature, temp_conf, i, table[i].delta, table[i].c_delta, table[0].c_sig, MAX_CONF[cpu]));
                     }
                 }
 
                 // Update the path confidence
-                if (la_pf_idx >= 0) 
+                if (la_pf_idx >= 0)
                 {
                     if (num_pf[cpu] < L2C_MSHR_SIZE)
                     {
@@ -348,7 +379,7 @@ int L2_ST_update(uint32_t cpu, uint64_t addr)
     int delta_buffer = 0, sig_buffer = 0;
 
     for (match=0; match<L2_ST_WAY; match++) {
-        if (table[match].valid && (table[match].tag == tag)) { // Hit 
+        if (table[match].valid && (table[match].tag == tag)) { // Hit
 			delta_buffer = curr_block - table[match].last_block; // Buffer current delta
             sig_buffer = table[match].signature; // Buffer old signature
 
@@ -366,7 +397,7 @@ int L2_ST_update(uint32_t cpu, uint64_t addr)
                 l2_sig_dist[cpu][table[match].signature]++;
 
                 if (warmup_complete[cpu])
-                L2_PF_DEBUG(printf("ST_hit_first cpu: %d cl_addr: %lx page: %lx block: %d init_sig: %x delta: %d\n", 
+                L2_PF_DEBUG(printf("ST_hit_first cpu: %d cl_addr: %lx page: %lx block: %d init_sig: %x delta: %d\n",
                             cpu, addr >> LOG2_BLOCK_SIZE, curr_page, curr_block, table[match].signature, delta_buffer));
             }
             else {
@@ -382,7 +413,7 @@ int L2_ST_update(uint32_t cpu, uint64_t addr)
                     break;
 
                 if (warmup_complete[cpu])
-                L2_PF_DEBUG(printf("ST_hit cpu: %d cl_addr: %lx page: %lx block: %d old_sig: %x delta: %d\n", 
+                L2_PF_DEBUG(printf("ST_hit cpu: %d cl_addr: %lx page: %lx block: %d old_sig: %x delta: %d\n",
                             cpu, addr >> LOG2_BLOCK_SIZE, curr_page, curr_block, sig_buffer, delta_buffer));
 
                 // Update signature
@@ -429,7 +460,7 @@ int L2_ST_update(uint32_t cpu, uint64_t addr)
         table[match].signature = 0;
         table[match].first_hit = 0;
         table[match].last_block = curr_block;
-        
+
         for (int i=0; i<64; i++) {
             table[match].l2_pf[i] = 0;
             table[match].used[i] = 0;
@@ -454,13 +485,13 @@ int L2_ST_update(uint32_t cpu, uint64_t addr)
                 spec_sig = get_new_signature(L2_GHR[cpu][i].signature, L2_GHR[cpu][i].oop_delta);
                 if (warmup_complete[cpu])
                 L2_PF_DEBUG(printf("cpu: %d OOP_match  L2_GHR[%d]  signature: %x  path_conf: %d  last_block: %d  oop_delta: %d  spec_block: %d == curr_block: %d  spec_sig: %x\n",
-                          cpu, i, L2_GHR[cpu][i].signature, L2_GHR[cpu][i].path_conf, L2_GHR[cpu][i].last_block, 
+                          cpu, i, L2_GHR[cpu][i].signature, L2_GHR[cpu][i].path_conf, L2_GHR[cpu][i].last_block,
                           L2_GHR[cpu][i].oop_delta, spec_block, curr_block, spec_sig));
             }
             else {
                 if (warmup_complete[cpu])
                 L2_PF_DEBUG(printf("cpu: %d OOP_unmatch  L2_GHR[%d]  signature: %x  path_conf: %d  last_block: %d  oop_delta: %d  spec_block: %d != curr_block: %d  spec_sig: %x\n",
-                          cpu, i, L2_GHR[cpu][i].signature, L2_GHR[cpu][i].path_conf, L2_GHR[cpu][i].last_block, 
+                          cpu, i, L2_GHR[cpu][i].signature, L2_GHR[cpu][i].path_conf, L2_GHR[cpu][i].last_block,
                           L2_GHR[cpu][i].oop_delta, spec_block, curr_block, spec_sig));
             }
         }
@@ -472,7 +503,7 @@ int L2_ST_update(uint32_t cpu, uint64_t addr)
             hit = 1;
             table[match].signature = spec_sig;
             if (warmup_complete[cpu])
-            L2_PF_DEBUG(printf("cpu: %d spec_update  page: %x  sig: %3x  delta: %3d  curr_block: %2d  last_block[NA]: %2d\n", 
+            L2_PF_DEBUG(printf("cpu: %d spec_update  page: %x  sig: %3x  delta: %3d  curr_block: %2d  last_block[NA]: %2d\n",
                       cpu, tag, spec_sig, L2_GHR[cpu][ghr_idx].oop_delta, curr_block, L2_GHR[cpu][ghr_idx].last_block));
         }
         #endif
@@ -504,7 +535,7 @@ int L2_ST_check(uint32_t cpu, uint64_t addr)
     for (match=0; match<L2_ST_WAY; match++) {
         if (table[match].valid && (table[match].tag == tag)) {
             if (warmup_complete[cpu])
-            L2_PF_DEBUG(printf("ST_check found cpu: %d cl_addr: %lx page: %lx block: %ld old_sig: %x last_block: %d\n", 
+            L2_PF_DEBUG(printf("ST_check found cpu: %d cl_addr: %lx page: %lx block: %ld old_sig: %x last_block: %d\n",
                         cpu, addr >> LOG2_BLOCK_SIZE, curr_page, (addr >> LOG2_BLOCK_SIZE) & 0x3F, table[match].signature, table[match].last_block));
             return match;
         }
@@ -534,14 +565,14 @@ void L2_PT_update(uint32_t cpu, int signature, int delta)
     }
 
     int match;
-    for (match=0; match<L2_PT_WAY; match++) 
+    for (match=0; match<L2_PT_WAY; match++)
     {
-        if (table[match].delta == delta) // Hit 
+        if (table[match].delta == delta) // Hit
         {
             table[match].c_delta++;
 
             if (warmup_complete[cpu])
-            L2_PF_DEBUG(printf("PT_sig: %4x cpu: %d update_hit delta[%d]: %2d (%d / %d)\n", 
+            L2_PF_DEBUG(printf("PT_sig: %4x cpu: %d update_hit delta[%d]: %2d (%d / %d)\n",
                         signature, cpu, match, table[match].delta, table[match].c_delta, table[0].c_sig));
             L2_PT_hit[cpu]++; L2_PT_access[cpu]++;
             break;
@@ -559,7 +590,7 @@ void L2_PT_update(uint32_t cpu, int signature, int delta)
                 table[match].c_delta = 0;
 
                 if (warmup_complete[cpu])
-                L2_PF_DEBUG(printf("PT_sig: %4x cpu: %d update_invalid delta[%d]: %2d (%d / %d)\n", 
+                L2_PF_DEBUG(printf("PT_sig: %4x cpu: %d update_invalid delta[%d]: %2d (%d / %d)\n",
                             signature, cpu, match, table[match].delta, table[match].c_delta, table[0].c_sig));
                 L2_PT_invalid[cpu]++; L2_PT_access[cpu]++;
                 break;
@@ -587,7 +618,7 @@ void L2_PT_update(uint32_t cpu, int signature, int delta)
         table[match].c_delta = 0;
 
         if (warmup_complete[cpu])
-        L2_PF_DEBUG(printf("PT_sig: %4x cpu: %d update_miss delta[%d]: %2d (%d / %d)\n", 
+        L2_PF_DEBUG(printf("PT_sig: %4x cpu: %d update_miss delta[%d]: %2d (%d / %d)\n",
                     signature, cpu, match, table[match].delta, table[match].c_delta, table[0].c_sig));
         L2_PT_miss[cpu]++; L2_PT_access[cpu]++;
     }
@@ -638,7 +669,7 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
     }
     L2_ST[cpu][l2_st_idx][l2_st_match].used[curr_block] = 1;
 
-    // Dynamically update MAX_CONF (measured by ST) 
+    // Dynamically update MAX_CONF (measured by ST)
     if (spp_pf_issued[cpu])
         MAX_CONF[cpu] = (100*spp_pf_useful[cpu])/spp_pf_issued[cpu];
 
@@ -669,8 +700,10 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
     if (warmup_complete[cpu])
     L2_PF_DEBUG(printf("\n"));
 
+    int count_prefetch = 0;
+
     for (int i=0; i<num_pf[cpu]; i++) {
-        if (pf_buffer[cpu][i].delta == 0) { 
+        if (pf_buffer[cpu][i].delta == 0) {
             printf("pf_delta[%d][%d]: %d  num_pf_delta: %d\n", cpu, i, pf_buffer[cpu][i].delta, num_pf[cpu]);
             assert(0);
         }
@@ -682,7 +715,7 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
             // Check bitmap
             int l2_pf = L2_ST[cpu][l2_st_idx][l2_st_match].l2_pf[pf_block],
                 l2_demand = L2_ST[cpu][l2_st_idx][l2_st_match].used[pf_block];
-            
+
             //if (bitmap_check)
             if (l2_pf || l2_demand) {
                 if (warmup_complete[cpu])
@@ -691,10 +724,12 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
             else {
                 if (pf_buffer[cpu][i].conf >= FILL_THRESHOLD) { // Prefetch to the L2
                     if (prefetch_line(ip, addr, pf_addr, FILL_L2)) {
-                        PF_inflight[cpu]++; 
+                        ++count_prefetch;
+                        recordOffsetStats(cpu, pf_buffer[cpu][i].delta);
+                        PF_inflight[cpu]++;
                         if (warmup_complete[cpu])
                         L2_PF_DEBUG(printf("L2_PREFETCH  cpu: %d base_cl: %lx pf_cl: %lx delta: %d d_sig: %x pf_sig: %x depth: %d conf: %d\n",
-                                    cpu, addr >> LOG2_BLOCK_SIZE, pf_addr >> LOG2_BLOCK_SIZE, pf_buffer[cpu][i].delta, 
+                                    cpu, addr >> LOG2_BLOCK_SIZE, pf_addr >> LOG2_BLOCK_SIZE, pf_buffer[cpu][i].delta,
                                     pf_buffer[cpu][i].signature, pf_buffer[cpu][i].conf, pf_buffer[cpu][i].depth, pf_buffer[cpu][i].conf));
 
                         // Mark bitmap (prefetch)
@@ -711,16 +746,20 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
                 }
                 else if (pf_buffer[cpu][i].conf >= PF_THRESHOLD) { // Prefetch to the LLC
                     if (prefetch_line(ip, addr, pf_addr, FILL_LLC)) {
-                        PF_inflight[cpu]++; 
+                        ++count_prefetch;
+                        recordOffsetStats(cpu, pf_buffer[cpu][i].delta);
+                        PF_inflight[cpu]++;
                         if (warmup_complete[cpu])
                         L2_PF_DEBUG(printf("LLC_PREFETCH cpu: %d base_cl: %lx pf_cl: %lx delta: %d d_sig: %x pf_sig: %x depth: %d conf: %d\n",
-                                    cpu, addr >> LOG2_BLOCK_SIZE, pf_addr >> LOG2_BLOCK_SIZE, pf_buffer[cpu][i].delta, 
+                                    cpu, addr >> LOG2_BLOCK_SIZE, pf_addr >> LOG2_BLOCK_SIZE, pf_buffer[cpu][i].delta,
                                     pf_buffer[cpu][i].signature, pf_buffer[cpu][i].conf, pf_buffer[cpu][i].depth, pf_buffer[cpu][i].conf));
                     }
                 }
             }
         }
     }
+
+    recordPrefetchDegree(cpu, count_prefetch);
 
     if (warmup_complete[cpu])
     L2_PF_DEBUG(printf("\n"));
@@ -762,20 +801,29 @@ void CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way,
     }
 }
 
-void CACHE::l2c_prefetcher_final_stats()
-{
-    cout << endl << "L2C Signature Path Prefetcher final stats" << endl;
+void CACHE::l2c_prefetcher_final_stats() {
+  cout << endl << "L2C Signature Path Prefetcher final stats" << endl;
 
-    /*
-    int temp1 = 0, temp2 = 0;
-    for (int i=0; i<L2C_MSHR_SIZE; i++)
-    {
-        temp1 += useful_depth[cpu][i];
-        temp2 += useless_depth[cpu][i];
-    }
-    for (int i=0; i<L2C_MSHR_SIZE; i++)
-        printf("mlc_useful_depth %2d %5.1f%% %10d  mlc_useless_depth %2d %5.1f%% %10d\n", 
-        i, (100.0*useful_depth[cpu][i])/temp1, useful_depth[cpu][i], 
-        i, (100.0*useless_depth[cpu][i])/temp2, useless_depth[cpu][i]);
-    */
+  /*
+  int temp1 = 0, temp2 = 0;
+  for (int i=0; i<L2C_MSHR_SIZE; i++)
+  {
+      temp1 += useful_depth[cpu][i];
+      temp2 += useless_depth[cpu][i];
+  }
+  for (int i=0; i<L2C_MSHR_SIZE; i++)
+      printf("mlc_useful_depth %2d %5.1f%% %10d  mlc_useless_depth %2d %5.1f%%
+  %10d\n", i, (100.0*useful_depth[cpu][i])/temp1, useful_depth[cpu][i], i,
+  (100.0*useless_depth[cpu][i])/temp2, useless_depth[cpu][i]);
+  */
+
+  for (int i = 0; i < NOFFSETS; ++i) {
+    cout << "CPU" << cpu << " Number of used offset " << offsets[i] << " : "
+         << totalUsedOffset[cpu][i] << endl;
+  }
+
+  for (int i = 0; i < L2C_MSHR_SIZE + 1; ++i) {
+    cout << "CPU" << cpu << " Degree " << i << ": "
+         << histoPrefetchDegree[cpu][i] << endl;
+  }
 }
