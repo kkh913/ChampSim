@@ -45,6 +45,7 @@ uint64_t totalLayerHits[NUM_CPUS];
 uint64_t totalFalsePositive[NUM_CPUS];
 uint64_t totalLifeTime[NUM_CPUS];
 uint64_t sampledTags[NUM_CPUS];
+uint64_t histoPrefetchDegree[NUM_CPUS][DEGREE+1];
 
 void clearOffsetList(uint8_t cpu) {
   for (int i = 0; i < DEGREE; ++i) {
@@ -147,6 +148,10 @@ void recordOffsetStats(uint8_t cpu, int offset) {
   }
 }
 
+void recordPrefetchDegree(uint8_t cpu, int degree) {
+  ++histoPrefetchDegree[cpu][degree];
+}
+
 void CACHE::l2c_prefetcher_initialize() {
   cout << "L2C Layer Prefetcher" << endl;
 
@@ -182,19 +187,27 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip,
     clearStack(cpu);
   }
 
+  int count_prefetch = 0;
+
   for (int i = 0; i < DEGREE; ++i) {
     if (offset_list[cpu][i] != 0) {
       if (SAMEPAGE(cl_address, cl_address + offset_list[cpu][i])) {
         recordOffsetStats(cpu, offset_list[cpu][i]);
         uint64_t pf_addr = (cl_address + offset_list[cpu][i]) << LOG2_BLOCK_SIZE;
         if (MSHR.occupancy < 8) {
-          prefetch_line(ip, addr, pf_addr, FILL_L2);
+          if (prefetch_line(ip, addr, pf_addr, FILL_L2)) {
+            ++count_prefetch;
+          }
         } else {
-          prefetch_line(ip, addr, pf_addr, FILL_LLC);
+          if (prefetch_line(ip, addr, pf_addr, FILL_LLC)) {
+            ++count_prefetch;
+          }
         }
       }
     }
   }
+
+  recordPrefetchDegree(cpu, count_prefetch);
 }
 
 void CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way,
@@ -208,12 +221,18 @@ void CACHE::l2c_prefetcher_final_stats() {
          << totalUsedOffset[cpu][i] << endl;
   }
   cout << "CPU" << cpu
-       << " Total number of hits in layer sets : " << totalLayerHits[cpu] << endl;
-  cout << "CPU" << cpu
-       << " Total number of false positive : " << totalFalsePositive[cpu] << endl;
-  cout << "CPU" << cpu << " Total of tag life : " << totalLifeTime[cpu] << endl;
-  cout << "CPU" << cpu << " Number of evicted tags : " << sampledTags[cpu] << endl;
-  cout << "CPU" << cpu
-       << " Average of tag life : " << (double)totalLifeTime[cpu] / sampledTags[cpu]
+       << " Total number of hits in layer sets : " << totalLayerHits[cpu]
        << endl;
+  cout << "CPU" << cpu
+       << " Total number of false positive : " << totalFalsePositive[cpu]
+       << endl;
+  cout << "CPU" << cpu << " Total of tag life : " << totalLifeTime[cpu] << endl;
+  cout << "CPU" << cpu << " Number of evicted tags : " << sampledTags[cpu]
+       << endl;
+  cout << "CPU" << cpu << " Average of tag life : "
+       << (double)totalLifeTime[cpu] / sampledTags[cpu] << endl;
+  for (int i = 0; i < DEGREE + 1; ++i) {
+    cout << "CPU" << cpu << " Degree " << i << ": "
+         << histoPrefetchDegree[cpu][i] << endl;
+  }
 }
