@@ -3,7 +3,7 @@
 #define NOFFSETS 26
 #define DEFAULT_OFFSET 1
 #define SCORE_MAX 31
-#define ROUND_MAX 100
+#define ROUND_MAX 127
 #define RRINDEX 8
 #define RRTAG 12
 #define BAD_SCORE 1
@@ -35,41 +35,40 @@ const int OFFSET[NOFFSETS] = {1,  2,  3,  4,  5,  6,  8,  9,  10,
                               12, 15, 16, 18, 20, 24, 25, 27, 30,
                               32, 36, 40, 45, 48, 50, 54, 60};
 
-int prefetch_offset;
+int prefetch_offset[NUM_CPUS];
 
-int recent_request[1 << RRINDEX];
+int recent_request[NUM_CPUS][1 << RRINDEX];
 
-int tag_life[1 << RRINDEX];
+uint64_t tag_life[NUM_CPUS][1 << RRINDEX];
 
-uint64_t real_addr[1 << RRINDEX];
+uint64_t real_addr[NUM_CPUS][1 << RRINDEX];
 
-struct offsets_scores os;
+struct offsets_scores os[NUM_CPUS];
 
-uint64_t totalUsedOffset[NOFFSETS];
-uint64_t totalLifeTime;
-uint64_t sampledTags;
-uint64_t totalRRHits;
-uint64_t totalRRMisses;
-uint64_t totalFalsePositive;
+uint64_t totalUsedOffset[NUM_CPUS][NOFFSETS];
+uint64_t totalLifeTime[NUM_CPUS];
+uint64_t sampledTags[NUM_CPUS];
+uint64_t totalRRHits[NUM_CPUS];
+uint64_t totalRRMisses[NUM_CPUS];
+uint64_t totalFalsePositive[NUM_CPUS];
 
-void rr_init();
+void rr_init(uint8_t cpu);
 int rr_tag(uint64_t lineaddr);
 int rr_index(uint64_t lineaddr);
-void rr_insert(uint64_t lineaddr);
-bool rr_hit(uint64_t lineaddr);
+void rr_insert(uint8_t cpu, uint64_t lineaddr);
+bool rr_hit(uint8_t cpu, uint64_t lineaddr);
 
-void os_reset();
-void os_learn_best_offset(uint64_t lineaddr);
+void os_reset(uint8_t cpu);
+void os_learn_best_offset(uint8_t cpu, uint64_t lineaddr);
 
-bool issue_prefetch(uint64_t lineaddr);
+bool issue_prefetch(uint8_t cpu, uint64_t lineaddr);
 
-void recordOffsetStats();
-void increaseLifeTime();
+void recordOffsetStats(uint8_t cpu);
 
 void CACHE::l2c_prefetcher_initialize() {
-  prefetch_offset = DEFAULT_OFFSET;
-  rr_init();
-  os_reset();
+  prefetch_offset[cpu] = DEFAULT_OFFSET;
+  rr_init(cpu);
+  os_reset(cpu);  
 }
 
 void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip,
@@ -79,15 +78,15 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip,
   if (cache_hit == 0 ||                // cache miss
       (cache_hit == 1 && type == 1)) { //  prefetched hit
 
-    os_learn_best_offset(cl_address);
-    if (issue_prefetch(cl_address)) {
-      uint64_t pf_addr = (cl_address + prefetch_offset) << LOGLINE;
+    os_learn_best_offset(cpu, cl_address);
+    if (issue_prefetch(cpu, cl_address)) {
+      uint64_t pf_addr = (cl_address + prefetch_offset[cpu]) << LOGLINE;
       if (MSHR.occupancy < 8) {
         prefetch_line(ip, addr, pf_addr, FILL_L2);
       } else {
         prefetch_line(ip, addr, pf_addr, FILL_LLC);
       }
-      recordOffsetStats();
+      recordOffsetStats(cpu);
     }
   }
 }
@@ -98,40 +97,52 @@ void CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way,
     return;
 
   uint64_t cl_address = addr >> LOGLINE;
-  uint64_t baselineaddr = cl_address - prefetch_offset;
+  uint64_t baselineaddr = cl_address - prefetch_offset[cpu];
 
   if (SAMEPAGE(baselineaddr, cl_address)) {
     // block address inserted.
-    rr_insert(baselineaddr);
+    rr_insert(cpu, baselineaddr);
   }
 }
 
 void CACHE::l2c_prefetcher_final_stats() {
+  uint64_t cycle = current_core_cycle[cpu];
+  int numEntries = 1 << RRINDEX;
+
+  for (int i = 0; i < numEntries; ++i) {
+    if (tag_life[cpu][i]) {
+      assert(cycle - tag_life[cpu][i] > 0);
+      totalLifeTime[cpu] += (cycle - tag_life[cpu][i]);
+      ++sampledTags[cpu];
+    }
+  }
+
   cout << endl << "L2C BO Prefetcher final stats" << endl;
 
   for (int i = 0; i < NOFFSETS; ++i) {
     cout << "CPU" << cpu << " Number of used offset " << OFFSET[i] << " : "
-         << totalUsedOffset[i] << endl;
+         << totalUsedOffset[cpu][i] << endl;
   }
 
-  cout << "CPU" << cpu << " Total of tag life : " << totalLifeTime << endl;
-  cout << "CPU" << cpu << " Number of evicted tags : " << sampledTags << endl;
-  cout << "CPU" << cpu
-       << " Average of tag life : " << (double)totalLifeTime / sampledTags
+  cout << "CPU" << cpu << " Total of tag life : " << totalLifeTime[cpu] << endl;
+  cout << "CPU" << cpu << " Number of sampled tags : " << sampledTags[cpu]
        << endl;
+  cout << "CPU" << cpu << " Average of tag life : "
+       << (double)totalLifeTime[cpu] / sampledTags[cpu] << endl;
 
-  cout << "CPU" << cpu << " Total number of rr table hits : " << totalRRHits
-       << endl;
-  cout << "CPU" << cpu << " Total number of rr table misses : " << totalRRMisses
-       << endl;
-  cout << "CPU" << cpu << " Total number of false positive : " << totalFalsePositive
+  cout << "CPU" << cpu
+       << " Total number of rr table hits : " << totalRRHits[cpu] << endl;
+  cout << "CPU" << cpu
+       << " Total number of rr table misses : " << totalRRMisses[cpu] << endl;
+  cout << "CPU" << cpu
+       << " Total number of false positive : " << totalFalsePositive[cpu]
        << endl;
 }
 
-void rr_init() {
+void rr_init(uint8_t cpu) {
   for (int i = 0; i < (1 << RRINDEX); i++) {
-    recent_request[i] = 0;
-    tag_life[i] = 0;
+    recent_request[cpu][i] = 0;
+    tag_life[cpu][i] = 0;
   }
 }
 
@@ -141,107 +152,97 @@ int rr_index(uint64_t lineaddr) {
   return TRUNCATE(lineaddr ^ (lineaddr >> RRINDEX), RRINDEX);
 }
 
-void rr_insert(uint64_t lineaddr) {
+void rr_insert(uint8_t cpu, uint64_t lineaddr) {
   int i = rr_index(lineaddr);
   int tag = rr_tag(lineaddr);
+  uint64_t cycle = current_core_cycle[cpu];
 
-  if (recent_request[i] != tag) {
+  if (recent_request[cpu][i] != tag) {
     // replacement event...
-    if (recent_request[i] != 0) {
-      totalLifeTime += tag_life[i];
-      ++sampledTags;
+    if (tag_life[cpu][i]) {
+      assert(cycle - tag_life[cpu][i] > 0);
+      totalLifeTime[cpu] += (cycle - tag_life[cpu][i]);
+      ++sampledTags[cpu];
     }
 
-    increaseLifeTime();
-
-    recent_request[i] = tag;
-    tag_life[i] = 0;
-  } else {
-    increaseLifeTime();
+    recent_request[cpu][i] = tag;
+    tag_life[cpu][i] = cycle;
   }
 
-  real_addr[i] = lineaddr; //  for statistics...
+  real_addr[cpu][i] = lineaddr; //  for statistics...
 }
 
-bool rr_hit(uint64_t lineaddr) {
+bool rr_hit(uint8_t cpu, uint64_t lineaddr) {
   int i = rr_index(lineaddr);
   int tag = rr_tag(lineaddr);
-  bool ret = recent_request[i] == tag;
+  bool ret = recent_request[cpu][i] == tag;
 
-  if (ret) { //  RR hit    
-    if (real_addr[i] != lineaddr) {
-      ++totalFalsePositive;
+  if (ret) { //  RR hit
+    if (real_addr[cpu][i] != lineaddr) {
+      ++totalFalsePositive[cpu];
     }
   }
 
   return ret;
 }
 
-void os_reset() {
+void os_reset(uint8_t cpu) {
   for (int i = 0; i < NOFFSETS; i++) {
-    os.score[i] = 0;
+    os[cpu].score[i] = 0;
   }
-  os.max_score = 0;
-  os.best_offset = 0;
-  os.round = 0;
-  os.p = 0;
+  os[cpu].max_score = 0;
+  os[cpu].best_offset = 0;
+  os[cpu].round = 0;
+  os[cpu].p = 0;
 }
 
-void os_learn_best_offset(uint64_t lineaddr) {
-  int testoffset = OFFSET[os.p];
+void os_learn_best_offset(uint8_t cpu, uint64_t lineaddr) {
+  int testoffset = OFFSET[os[cpu].p];
   uint64_t testlineaddr = lineaddr - testoffset;
 
-  if (SAMEPAGE(lineaddr, testlineaddr) && rr_hit(testlineaddr)) {
+  if (SAMEPAGE(lineaddr, testlineaddr) && rr_hit(cpu, testlineaddr)) {
+    ++totalRRHits[cpu];
 
-    ++totalRRHits;
-
-    os.score[os.p]++;
-    if (os.score[os.p] >= os.max_score) {
-      os.max_score = os.score[os.p];
-      os.best_offset = testoffset;
+    os[cpu].score[os[cpu].p]++;
+    if (os[cpu].score[os[cpu].p] >= os[cpu].max_score) {
+      os[cpu].max_score = os[cpu].score[os[cpu].p];
+      os[cpu].best_offset = testoffset;
     }
   } else {
-    ++totalRRMisses;
+    ++totalRRMisses[cpu];
   }
 
-  if (os.p == (NOFFSETS - 1)) {
-    os.round++;
+  if (os[cpu].p == (NOFFSETS - 1)) {
+    os[cpu].round++;
 
-    if ((os.max_score == SCORE_MAX) || (os.round == ROUND_MAX)) {
-      prefetch_offset = (os.best_offset != 0) ? os.best_offset : DEFAULT_OFFSET;
-      if (os.max_score <= BAD_SCORE) {
-        prefetch_offset = 0;
+    if ((os[cpu].max_score == SCORE_MAX) || (os[cpu].round == ROUND_MAX)) {
+      prefetch_offset[cpu] =
+          (os[cpu].best_offset != 0) ? os[cpu].best_offset : DEFAULT_OFFSET;
+      if (os[cpu].max_score <= BAD_SCORE) {
+        prefetch_offset[cpu] = 0;
       }
-      os_reset();
+      os_reset(cpu);
     }
   }
-  INCREMENT(os.p, NOFFSETS); // prepare to test the next offset
+  INCREMENT(os[cpu].p, NOFFSETS); // prepare to test the next offset
 }
 
-bool issue_prefetch(uint64_t lineaddr) {
-  if (prefetch_offset == 0) {
+bool issue_prefetch(uint8_t cpu, uint64_t lineaddr) {
+  if (prefetch_offset[cpu] == 0) {
     return false;
   }
 
-  if (!SAMEPAGE(lineaddr, lineaddr + prefetch_offset)) {
+  if (!SAMEPAGE(lineaddr, lineaddr + prefetch_offset[cpu])) {
     return false;
   }
   return true;
 }
 
-void recordOffsetStats() {
+void recordOffsetStats(uint8_t cpu) {
   for (int i = 0; i < NOFFSETS; ++i) {
-    if (OFFSET[i] == prefetch_offset) {
-      ++totalUsedOffset[i];
+    if (OFFSET[i] == prefetch_offset[cpu]) {
+      ++totalUsedOffset[cpu][i];
       break;
-    }
-  }
-}
-
-void increaseLifeTime() {
-  for (int i = 0; i < (1 << RRINDEX); ++i) {
-    if (recent_request[i] != 0) {
-      ++tag_life[i];
     }
   }
 }
