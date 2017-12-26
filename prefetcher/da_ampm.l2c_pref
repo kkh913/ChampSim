@@ -1,0 +1,504 @@
+//
+// Data Prefetching Championship Simulator 2
+// Seth Pugsley, seth.h.pugsley@intel.com
+//
+
+/*
+
+   This file describes a prefetcher that resembles a simplified version of the
+   Access Map Pattern Matching (AMPM) prefetcher, which won the first
+   Data Prefetching Championship.  The original AMPM prefetcher tracked large
+   regions of virtual address space to make prefetching decisions, but this
+   version works only on smaller 4 KB physical pages.
+
+ */
+
+#include "cache.h"
+
+#define AMPM_PAGE_COUNT 64
+#define PREFETCH_DEGREE 2
+#define OFFSETS 32
+#define BLOCKS_PER_PAGE 64
+
+typedef struct ampm_page {
+  // page address
+  uint64_t page;
+
+  // The access map itself.
+  // Each element is set when the corresponding cache line is accessed.
+  // The whole structure is analyzed to make prefetching decisions.
+  // While this is coded as an integer array, it is used conceptually as a
+  // single 64-bit vector.
+  int access_map[BLOCKS_PER_PAGE];
+
+  // This map represents cache lines in this page that have already been
+  // prefetched. We will only prefetch lines that haven't already been either
+  // demand accessed or prefetched.
+  int pf_map[BLOCKS_PER_PAGE];
+
+  // used for page replacement
+  uint64_t lru;
+
+  // For statistics only
+  // cycle when a map is generated
+  uint64_t cycle;
+
+  // if a map is used more than once for prefetch
+  bool used;
+
+  //  for DRAM-Aware
+  //  new state "waiting" added
+  int wait_map[BLOCKS_PER_PAGE];
+
+  //  The AMPM map covers 4K pages. Since the DRAM row size is 2K, two temporary
+  //  regs are required for outstanding a prefetch.
+  int first_outstanding_prefetch_offset;
+  int second_outstanding_prefetch_offset;
+} ampm_page_t;
+
+ampm_page_t ampm_pages[NUM_CPUS][AMPM_PAGE_COUNT];
+
+uint64_t totalUsedMaps[NUM_CPUS];
+uint64_t totalSampledMaps[NUM_CPUS];
+uint64_t totalMapLifeTime[NUM_CPUS];
+
+void CACHE::l2c_prefetcher_initialize() {
+  cout << "L2C AMPM Prefetcher" << endl;
+
+  int i;
+  for (i = 0; i < AMPM_PAGE_COUNT; i++) {
+    ampm_pages[cpu][i].page = 0;
+    ampm_pages[cpu][i].lru = 0;
+    ampm_pages[cpu][i].cycle = 0;
+    ampm_pages[cpu][i].used = false;
+    ampm_pages[cpu][i].first_outstanding_prefetch_offset = -1;
+    ampm_pages[cpu][i].second_outstanding_prefetch_offset = -1;
+    int j;
+    for (j = 0; j < BLOCKS_PER_PAGE; j++) {
+      ampm_pages[cpu][i].access_map[j] = 0;
+      ampm_pages[cpu][i].pf_map[j] = 0;
+      ampm_pages[cpu][i].wait_map[j] = 0;
+    }
+  }
+}
+
+void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip,
+                                   uint8_t cache_hit, uint8_t type) {
+  uint64_t cl_address = addr >> LOG2_BLOCK_SIZE;
+  uint64_t page = addr >> LOG2_PAGE_SIZE;
+  uint64_t page_offset = cl_address & (BLOCKS_PER_PAGE - 1);
+  uint64_t cycle = current_core_cycle[cpu];
+
+  // check to see if we have a page hit
+  int page_index = -1;
+  int i;
+  for (i = 0; i < AMPM_PAGE_COUNT; i++) {
+    if (ampm_pages[cpu][i].page == page) {
+      page_index = i;
+      break;
+    }
+  }
+
+  if (page_index == -1) {
+    // the page was not found, so we must replace an old page with this new page
+
+    ++totalUsedMaps[cpu];
+
+    // find the oldest page
+    int lru_index = 0;
+    uint64_t lru_cycle = ampm_pages[cpu][lru_index].lru;
+    int i;
+    for (i = 0; i < AMPM_PAGE_COUNT; i++) {
+      if (ampm_pages[cpu][i].lru < lru_cycle) {
+        lru_index = i;
+        lru_cycle = ampm_pages[cpu][lru_index].lru;
+      }
+    }
+    page_index = lru_index;
+
+    if (ampm_pages[cpu][page_index].used) {
+      assert(cycle - ampm_pages[cpu][page_index].cycle > 0);
+      totalMapLifeTime[cpu] += cycle - ampm_pages[cpu][page_index].cycle;
+      ++totalSampledMaps[cpu];
+    }
+
+    // reset the oldest page
+    ampm_pages[cpu][page_index].page = page;
+    ampm_pages[cpu][page_index].cycle = cycle;
+    ampm_pages[cpu][page_index].used = false;
+    ampm_pages[cpu][page_index].first_outstanding_prefetch_offset = -1;
+    ampm_pages[cpu][page_index].second_outstanding_prefetch_offset = -1;
+    for (i = 0; i < BLOCKS_PER_PAGE; i++) {
+      ampm_pages[cpu][page_index].access_map[i] = 0;
+      ampm_pages[cpu][page_index].pf_map[i] = 0;
+      ampm_pages[cpu][page_index].wait_map[i] = 0;
+    }
+  }
+
+  // update LRU
+  ampm_pages[cpu][page_index].lru = cycle;
+
+  // mark the access map
+  ampm_pages[cpu][page_index].access_map[page_offset] = 1;
+
+  // positive prefetching
+  int count_prefetches = 0;
+  for (i = 1; i <= 16; i++) {
+    int check_index1 = page_offset - i;
+    int check_index2 = page_offset - 2 * i;
+    int pf_index = page_offset + i;
+
+    if (check_index2 < 0) {
+      break;
+    }
+
+    if (pf_index > (BLOCKS_PER_PAGE - 1)) {
+      break;
+    }
+
+    if (count_prefetches >= PREFETCH_DEGREE) {
+      break;
+    }
+
+    if (ampm_pages[cpu][page_index].access_map[pf_index] == 1) {
+      // don't prefetch something that's already been demand accessed
+      continue;
+    }
+
+    if (ampm_pages[cpu][page_index].pf_map[pf_index] == 1) {
+      // don't prefetch something that's alrady been prefetched
+      continue;
+    }
+
+    if (ampm_pages[cpu][page_index].wait_map[pf_index] == 1) {
+      // don't prefetch something that's alrady been waited
+      continue;
+    }
+
+    if ((ampm_pages[cpu][page_index].access_map[check_index1] == 1) &&
+        (ampm_pages[cpu][page_index].access_map[check_index2] == 1)) {
+      // we found the stride repeated twice, so issue a prefetch
+
+      bool row_type = (pf_index < 32) ? true : false;
+
+      if (row_type) { //  lower row
+        if (ampm_pages[cpu][page_index].first_outstanding_prefetch_offset < 0) {
+          ampm_pages[cpu][page_index].first_outstanding_prefetch_offset = pf_index;
+          ampm_pages[cpu][page_index].wait_map[pf_index] =
+              1; //  waiting bit set
+        } else { //  prefetch both outstanding and current prefetches.
+
+          //  for outstaning
+          uint64_t pf_address =
+              (page << LOG2_PAGE_SIZE) +
+              (ampm_pages[cpu][page_index].first_outstanding_prefetch_offset << LOG2_BLOCK_SIZE);
+
+          // check the MSHR occupancy to decide if we're going to prefetch to
+          // the L2 or LLC
+
+          bool isPrefetched = false;
+
+          if (MSHR.occupancy < 8) {
+            if (prefetch_line(ip, addr, pf_address, FILL_L2)) {
+              isPrefetched = true;
+            }
+          } else {
+            if (prefetch_line(ip, addr, pf_address, FILL_LLC)) {
+              isPrefetched = true;
+            }
+          }
+
+          // mark the prefetched line so we don't prefetch it again
+          if (isPrefetched) {
+            ampm_pages[cpu][page_index]
+                .pf_map[ampm_pages[cpu][page_index].first_outstanding_prefetch_offset] = 1;
+            count_prefetches++;
+            ampm_pages[cpu][page_index].used = true;
+          }
+
+          ampm_pages[cpu][page_index].first_outstanding_prefetch_offset = -1;
+
+          // for current
+          pf_address = (page << LOG2_PAGE_SIZE) + (pf_index << LOG2_BLOCK_SIZE);
+
+          // check the MSHR occupancy to decide if we're going to prefetch to
+          // the L2 or LLC
+
+          isPrefetched = false;
+
+          if (MSHR.occupancy < 8) {
+            if (prefetch_line(ip, addr, pf_address, FILL_L2)) {
+              isPrefetched = true;
+            }
+          } else {
+            if (prefetch_line(ip, addr, pf_address, FILL_LLC)) {
+              isPrefetched = true;
+            }
+          }
+
+          // mark the prefetched line so we don't prefetch it again
+          if (isPrefetched) {
+            ampm_pages[cpu][page_index].pf_map[pf_index] = 1;
+            count_prefetches++;
+            ampm_pages[cpu][page_index].used = true;
+          }
+        }
+      } else {
+        if (ampm_pages[cpu][page_index].second_outstanding_prefetch_offset < 0) {
+          ampm_pages[cpu][page_index].second_outstanding_prefetch_offset = pf_index;
+          ampm_pages[cpu][page_index].wait_map[pf_index] =
+              1; //  waiting bit set
+        } else {
+          //  for outstaning
+          uint64_t pf_address =
+              (page << LOG2_PAGE_SIZE) +
+              (ampm_pages[cpu][page_index].second_outstanding_prefetch_offset << LOG2_BLOCK_SIZE);
+
+          // check the MSHR occupancy to decide if we're going to prefetch to
+          // the L2 or LLC
+
+          bool isPrefetched = false;
+
+          if (MSHR.occupancy < 8) {
+            if (prefetch_line(ip, addr, pf_address, FILL_L2)) {
+              isPrefetched = true;
+            }
+          } else {
+            if (prefetch_line(ip, addr, pf_address, FILL_LLC)) {
+              isPrefetched = true;
+            }
+          }
+
+          // mark the prefetched line so we don't prefetch it again
+          if (isPrefetched) {
+            ampm_pages[cpu][page_index]
+                .pf_map[ampm_pages[cpu][page_index].second_outstanding_prefetch_offset] = 1;
+            count_prefetches++;
+            ampm_pages[cpu][page_index].used = true;
+          }
+
+          ampm_pages[cpu][page_index].second_outstanding_prefetch_offset = -1;
+
+          // for current
+          pf_address = (page << LOG2_PAGE_SIZE) + (pf_index << LOG2_BLOCK_SIZE);
+
+          // check the MSHR occupancy to decide if we're going to prefetch to
+          // the L2 or LLC
+
+          isPrefetched = false;
+
+          if (MSHR.occupancy < 8) {
+            if (prefetch_line(ip, addr, pf_address, FILL_L2)) {
+              isPrefetched = true;
+            }
+          } else {
+            if (prefetch_line(ip, addr, pf_address, FILL_LLC)) {
+              isPrefetched = true;
+            }
+          }
+
+          // mark the prefetched line so we don't prefetch it again
+          if (isPrefetched) {
+            ampm_pages[cpu][page_index].pf_map[pf_index] = 1;
+            count_prefetches++;
+            ampm_pages[cpu][page_index].used = true;
+          }
+        }
+      }
+    }
+  }
+
+  // negative prefetching
+  count_prefetches = 0;
+  for (i = 1; i <= 16; i++) {
+    int check_index1 = page_offset + i;
+    int check_index2 = page_offset + 2 * i;
+    int pf_index = page_offset - i;
+
+    if (check_index2 > (BLOCKS_PER_PAGE - 1)) {
+      break;
+    }
+
+    if (pf_index < 0) {
+      break;
+    }
+
+    if (count_prefetches >= PREFETCH_DEGREE) {
+      break;
+    }
+
+    if (ampm_pages[cpu][page_index].access_map[pf_index] == 1) {
+      // don't prefetch something that's already been demand accessed
+      continue;
+    }
+
+    if (ampm_pages[cpu][page_index].pf_map[pf_index] == 1) {
+      // don't prefetch something that's alrady been prefetched
+      continue;
+    }
+
+    if (ampm_pages[cpu][page_index].wait_map[pf_index] == 1) {
+      // don't prefetch something that's alrady been waited
+      continue;
+    }
+
+    if ((ampm_pages[cpu][page_index].access_map[check_index1] == 1) &&
+        (ampm_pages[cpu][page_index].access_map[check_index2] == 1)) {
+      // we found the stride repeated twice, so issue a prefetch
+      bool row_type = (pf_index < 32) ? true : false;
+
+      if (row_type) { //  lower row
+        if (ampm_pages[cpu][page_index].first_outstanding_prefetch_offset < 0) {
+          ampm_pages[cpu][page_index].first_outstanding_prefetch_offset = pf_index;
+          ampm_pages[cpu][page_index].wait_map[pf_index] =
+              1; //  waiting bit set
+        } else { //  prefetch both outstanding and current prefetches.
+
+          //  for outstaning
+          uint64_t pf_address =
+              (page << LOG2_PAGE_SIZE) +
+              (ampm_pages[cpu][page_index].first_outstanding_prefetch_offset << LOG2_BLOCK_SIZE);
+
+          // check the MSHR occupancy to decide if we're going to prefetch to
+          // the L2 or LLC
+
+          bool isPrefetched = false;
+
+          if (MSHR.occupancy < 8) {
+            if (prefetch_line(ip, addr, pf_address, FILL_L2)) {
+              isPrefetched = true;
+            }
+          } else {
+            if (prefetch_line(ip, addr, pf_address, FILL_LLC)) {
+              isPrefetched = true;
+            }
+          }
+
+          // mark the prefetched line so we don't prefetch it again
+          if (isPrefetched) {
+            ampm_pages[cpu][page_index]
+                .pf_map[ampm_pages[cpu][page_index].first_outstanding_prefetch_offset] = 1;
+            count_prefetches++;
+            ampm_pages[cpu][page_index].used = true;
+          }
+
+          ampm_pages[cpu][page_index].first_outstanding_prefetch_offset = -1;
+
+          // for current
+          pf_address = (page << LOG2_PAGE_SIZE) + (pf_index << LOG2_BLOCK_SIZE);
+
+          // check the MSHR occupancy to decide if we're going to prefetch to
+          // the L2 or LLC
+
+          isPrefetched = false;
+
+          if (MSHR.occupancy < 8) {
+            if (prefetch_line(ip, addr, pf_address, FILL_L2)) {
+              isPrefetched = true;
+            }
+          } else {
+            if (prefetch_line(ip, addr, pf_address, FILL_LLC)) {
+              isPrefetched = true;
+            }
+          }
+
+          // mark the prefetched line so we don't prefetch it again
+          if (isPrefetched) {
+            ampm_pages[cpu][page_index].pf_map[pf_index] = 1;
+            count_prefetches++;
+            ampm_pages[cpu][page_index].used = true;
+          }
+        }
+      } else {
+        if (ampm_pages[cpu][page_index].second_outstanding_prefetch_offset < 0) {
+          ampm_pages[cpu][page_index].second_outstanding_prefetch_offset = pf_index;
+          ampm_pages[cpu][page_index].wait_map[pf_index] =
+              1; //  waiting bit set
+        } else {
+          //  for outstaning
+          uint64_t pf_address =
+              (page << LOG2_PAGE_SIZE) +
+              (ampm_pages[cpu][page_index].second_outstanding_prefetch_offset << LOG2_BLOCK_SIZE);
+
+          // check the MSHR occupancy to decide if we're going to prefetch to
+          // the L2 or LLC
+
+          bool isPrefetched = false;
+
+          if (MSHR.occupancy < 8) {
+            if (prefetch_line(ip, addr, pf_address, FILL_L2)) {
+              isPrefetched = true;
+            }
+          } else {
+            if (prefetch_line(ip, addr, pf_address, FILL_LLC)) {
+              isPrefetched = true;
+            }
+          }
+
+          // mark the prefetched line so we don't prefetch it again
+          if (isPrefetched) {
+            ampm_pages[cpu][page_index]
+                .pf_map[ampm_pages[cpu][page_index].second_outstanding_prefetch_offset] = 1;
+            count_prefetches++;
+            ampm_pages[cpu][page_index].used = true;
+          }
+
+          ampm_pages[cpu][page_index].second_outstanding_prefetch_offset = -1;
+
+          // for current
+          pf_address = (page << LOG2_PAGE_SIZE) + (pf_index << LOG2_BLOCK_SIZE);
+
+          // check the MSHR occupancy to decide if we're going to prefetch to
+          // the L2 or LLC
+
+          isPrefetched = false;
+
+          if (MSHR.occupancy < 8) {
+            if (prefetch_line(ip, addr, pf_address, FILL_L2)) {
+              isPrefetched = true;
+            }
+          } else {
+            if (prefetch_line(ip, addr, pf_address, FILL_LLC)) {
+              isPrefetched = true;
+            }
+          }
+
+          // mark the prefetched line so we don't prefetch it again
+          if (isPrefetched) {
+            ampm_pages[cpu][page_index].pf_map[pf_index] = 1;
+            count_prefetches++;
+            ampm_pages[cpu][page_index].used = true;
+          }
+        }
+      }
+    }
+  }
+}
+
+void CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way,
+                                      uint8_t prefetch, uint64_t evicted_addr) {
+}
+
+void CACHE::l2c_prefetcher_final_stats() {
+  uint64_t cycle = current_core_cycle[cpu];
+
+  for (int i = 0; i < AMPM_PAGE_COUNT; ++i) {
+    if (ampm_pages[cpu][i].used) {
+      assert(cycle - ampm_pages[cpu][i].cycle > 0);
+      totalMapLifeTime[cpu] += cycle - ampm_pages[cpu][i].cycle;
+      ++totalSampledMaps[cpu];
+    }
+  }
+
+  cout << endl << "L2C AMPM Prefetcher final stats" << endl;
+
+  cout << "CPU" << cpu << " Total number of used maps : " << totalUsedMaps[cpu]
+       << endl;
+  cout << "CPU" << cpu
+       << " Total number of sampled maps : " << totalSampledMaps[cpu] << endl;
+
+  cout << "CPU" << cpu << " Total lifetime of maps : " << totalMapLifeTime[cpu]
+       << endl;
+  cout << "CPU" << cpu << " Average lifetime of maps : "
+       << (double)totalMapLifeTime[cpu] / totalSampledMaps[cpu] << endl;
+}
