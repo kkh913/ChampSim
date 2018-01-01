@@ -68,7 +68,6 @@ int MAX_DEGREE_PREFETCHED = 3;
 
 #define MAX_SAT_VALUE 4
 
-#define NUM_PROCS 4
 #define NUM_PAGE_BITS 12
 #define VLDP_DEBUG 0
 
@@ -88,7 +87,7 @@ typedef struct dram_queue {
     struct dram_queue *next;
 } dram_queue;
 
-dram_queue *head_dram = NULL;
+dram_queue *head_dram[NUM_CPUS];
 
 typedef struct prefetch_queue {
     unsigned long long int base_cache_line_addr;
@@ -98,15 +97,15 @@ typedef struct prefetch_queue {
     struct prefetch_queue *next;
 } prefetch_queue ;
 
-prefetch_queue *head_prefetch = NULL;
+prefetch_queue *head_prefetch[NUM_CPUS];
 
-void insert_virtual_dram_queue(unsigned long long int , unsigned long long int , int );
-int find_line_virtual_dram_queue(unsigned long long int);
-int cnt_dram_pending_requests(unsigned long long int);
+void insert_virtual_dram_queue(uint8_t, unsigned long long int , unsigned long long int , int );
+int find_line_virtual_dram_queue(uint8_t, unsigned long long int);
+int cnt_dram_pending_requests(uint8_t, unsigned long long int);
 
 void insert_prefetch_queue(unsigned long long int, unsigned long long int, int);
-int find_line_prefetch_queue(unsigned long long int );
-void delete_line_prefetch_queue(unsigned long long int );
+int find_line_prefetch_queue(uint8_t, unsigned long long int );
+void delete_line_prefetch_queue(uint8_t, unsigned long long int );
 
 static unsigned long long int degree_accesses = 0;
 static unsigned long long int degree_total = 0;
@@ -197,8 +196,8 @@ typedef struct delta_history_buffer
 
 } delta_buffer_t;
 
-delta_buffer_t delta_buffer[NUM_PROCS][NUM_PAGES_TRACKED_PER_CORE];
-int last_page_replaced_for_core[NUM_PROCS];
+delta_buffer_t delta_buffer[NUM_CPUS][NUM_PAGES_TRACKED_PER_CORE];
+int last_page_replaced_for_core[NUM_CPUS];
 
 
 //Offset Pred Table
@@ -215,7 +214,7 @@ typedef struct offset_prediction_table
 
     int valid;
 } offset_prediction_table_t;
-offset_prediction_table_t offset_prediction_table [NUM_PROCS][NUM_ENTRIES_IN_OFFSET_TABLE];
+offset_prediction_table_t offset_prediction_table [NUM_CPUS][NUM_ENTRIES_IN_OFFSET_TABLE];
 
 //delta prediction Table
 typedef struct delta_preditction_table
@@ -235,7 +234,7 @@ typedef struct delta_preditction_table
 
 
 #if PER_CORE_PREDICTION_TABLES==1
-delta_prediction_table_t delta_prediction_table[NUM_PROCS][NUM_DELTA_PREDICTION_TABLES][NUM_ENTRIES_PER_DELTA_PRED_TABLE];
+delta_prediction_table_t delta_prediction_table[NUM_CPUS][NUM_DELTA_PREDICTION_TABLES][NUM_ENTRIES_PER_DELTA_PRED_TABLE];
 #else
 delta_prediction_table_t delta_prediction_table[NUM_DELTA_PREDICTION_TABLES][NUM_ENTRIES_PER_DELTA_PRED_TABLE];
 #endif
@@ -244,17 +243,17 @@ delta_prediction_table_t delta_prediction_table[NUM_DELTA_PREDICTION_TABLES][NUM
 void initialize_vldp_vars()
 {
     #if PER_CORE_PREDICTION_TABLES==1
-    memset(delta_prediction_table, 0, sizeof(delta_prediction_table_t)*NUM_PROCS*NUM_DELTA_PREDICTION_TABLES*NUM_ENTRIES_PER_DELTA_PRED_TABLE);
+    memset(delta_prediction_table, 0, sizeof(delta_prediction_table_t)*NUM_CPUS*NUM_DELTA_PREDICTION_TABLES*NUM_ENTRIES_PER_DELTA_PRED_TABLE);
     #else
     memset(delta_prediction_table, 0, sizeof(delta_prediction_table_t)*NUM_DELTA_PREDICTION_TABLES*NUM_ENTRIES_PER_DELTA_PRED_TABLE);
     #endif
 
-    memset(delta_buffer, 0, sizeof(delta_buffer_t)*NUM_PROCS*NUM_PAGES_TRACKED_PER_CORE);
-    memset(last_page_replaced_for_core, 0, sizeof(int)*NUM_PROCS);
+    memset(delta_buffer, 0, sizeof(delta_buffer_t)*NUM_CPUS*NUM_PAGES_TRACKED_PER_CORE);
+    memset(last_page_replaced_for_core, 0, sizeof(int)*NUM_CPUS);
 
 }
 
-physical_address_t get_offset_prediction (int cpu_id,physical_address_t first_access_offset )
+physical_address_t get_offset_prediction (int cpu_id, physical_address_t first_access_offset)
 {
     for (int i=0; i<NUM_ENTRIES_IN_OFFSET_TABLE; i++)
     {
@@ -271,9 +270,9 @@ physical_address_t get_offset_prediction (int cpu_id,physical_address_t first_ac
     return 0;
 }
 
-void	update_offset_prediction_table(int cpu_id,int delta_buffer_entry)
+void	update_offset_prediction_table(int cpu_id, int delta_buffer_entry)
 {
-    physical_address_t first_access_offset ;
+    physical_address_t first_access_offset;
     int found=0;
     physical_address_t second_add_delta;
 
@@ -386,57 +385,9 @@ void assign_tag (int *a, int *b)
     }
 }
 
-void print_snapshot_of_VLDP_prediction_tables(int clear_tables, int clear_stats)
-{
-    //Print the delta history table
-    printf("Stride_History_Per_core_Per_Page:\n");
-    printf("%4s|%14s|%19s|%9s|%5s|%s\n", "Proc", "Page",      "Last_Accessed_CLine", "Num_Touch", "Index", "Strides");
-    for (int p=0; p < NUM_PROCS; p++)
-    {
-        for (int page=0; page< NUM_PAGES_TRACKED_PER_CORE; page++)
-        {
-            printf ("%4d|", p);
-            printf ("%10lld|", delta_buffer[p][page].page_number);
-            printf ("%19lld|", delta_buffer[p][page].last_accessed_cline);
-            printf ("%9d|",  delta_buffer[p][page].num_times_page_touched);
-            printf ("%5d|",  delta_buffer[p][page].last_index_tracked);
-
-            for (int s=0; s< NUM_DELTAS_TRACKED_PER_PAGE; s++)
-            printf ("%4d ", delta_buffer[p][page].deltas[s]);
-
-            printf("\n");
-        }
-    }
-
-    //print the prefetch prediction tables
-
-    #if PER_CORE_PREDICTION_TABLES==1
-    int p=NUM_PROCS;
-    #else
-    int p=1;
-    #endif
-
-    printf ("\n\nPrefetch_Prediction_Tables:\n");
-    for (int cpu_id=0; cpu_id< p; cpu_id++)
-    {
-        for (int table=0; table< NUM_DELTA_PREDICTION_TABLES; table++)
-        {
-            printf ("Table %d\n", table);
-            for (int entry=0; entry < NUM_ENTRIES_PER_DELTA_PRED_TABLE; entry++)
-            {
-                print_tag(&VLDP_TABLE[table][entry].tag[0]);
-                printf ("N:%5d A:%d P:%-3d\n",VLDP_TABLE[table][entry].num_used,   VLDP_TABLE[table][entry].accuracy, VLDP_TABLE[table][entry].predicted_delta);
-            }
-        }
-    }
-
-    printf ("\n");
-}
-
-
 void reset_delta_history_buffer (int cpu_id, int index)
 {
-    memset(&delta_buffer[cpu_id][index],0, sizeof(delta_buffer_t));
+    memset(&delta_buffer[cpu_id][index], 0, sizeof(delta_buffer_t));
 }
 
 int get_delta_buffer_entry(int cpu_id, physical_address_t page_number)
@@ -1095,10 +1046,10 @@ void schedule_prefetch_to_dram(uint32_t cpu_id, CACHE *cache){
 
 
     //delete old requests ...
-    LL_FOREACH_SAFE(head_prefetch, prefetch_el, prefetch_temp){
+    LL_FOREACH_SAFE(head_prefetch[cpu_id], prefetch_el, prefetch_temp){
 
         if ( (current_core_cycle[cpu_id] - (prefetch_el -> cycle_added) ) > 2000){
-            LL_DELETE(head_prefetch, prefetch_el);
+            LL_DELETE(head_prefetch[cpu_id], prefetch_el);
             free(prefetch_el);
         }
     }
@@ -1106,15 +1057,15 @@ void schedule_prefetch_to_dram(uint32_t cpu_id, CACHE *cache){
     int cnt = 0;
     //find the oldest thing with least degree from prefetch queue, and try to issue it depending on the follwoing two conditions. . .
 
-    LL_FOREACH_SAFE(head_prefetch, prefetch_el, prefetch_temp){
+    LL_FOREACH_SAFE(head_prefetch[cpu_id], prefetch_el, prefetch_temp){
 
         page_prefetch_addr = (prefetch_el -> prefetch_cache_line_addr) >> 6;
 
-        if( (cnt_dram_pending_requests(page_prefetch_addr) <= ROW_HIT_PER_PAGE)  ){
+        if( (cnt_dram_pending_requests(cpu_id, page_prefetch_addr) <= ROW_HIT_PER_PAGE)  ){
 
             //if request is too old don't issue it, delete it from prefetch queue ...
             if(  ( (prefetch_el -> degree)  >  MAX_DEGREE_PREFETCHED  )   ){
-                LL_DELETE(head_prefetch, prefetch_el);
+                LL_DELETE(head_prefetch[cpu_id], prefetch_el);
                 free(prefetch_el);
             }else{
                 cnt ++;
@@ -1130,9 +1081,9 @@ void schedule_prefetch_to_dram(uint32_t cpu_id, CACHE *cache){
                 if( (l2_read_queue_level < (0.75 *  L2C_RQ_SIZE))   &&   ( l2_mshr_queue_level < (0.75* L2C_MSHR_SIZE) ))  {
                     if(cache->prefetch_line(0, base_addr, prefetch_addr, FILL_L2) == 1){
                         //insert to dram queue
-                        if(find_line_virtual_dram_queue(prefetch_lineaddr)    == 0){
+                        if(find_line_virtual_dram_queue(cpu_id, prefetch_lineaddr)    == 0){
                             //l2 level ...
-                            insert_virtual_dram_queue(prefetch_lineaddr ,  current_core_cycle[cpu_id], 2);
+                            insert_virtual_dram_queue(cpu_id, prefetch_lineaddr ,  current_core_cycle[cpu_id], 2);
                         }
                     }
                 }
@@ -1140,14 +1091,14 @@ void schedule_prefetch_to_dram(uint32_t cpu_id, CACHE *cache){
                 else{
                     if(cache->prefetch_line(0, base_addr, prefetch_addr, FILL_LLC) == 1){
                         //insert to dram queue
-                        if(find_line_virtual_dram_queue(prefetch_lineaddr)    == 0){
+                        if(find_line_virtual_dram_queue(cpu_id, prefetch_lineaddr)    == 0){
                             //l2 level ...
-                            insert_virtual_dram_queue(prefetch_lineaddr ,  current_core_cycle[cpu_id], 3);
+                            insert_virtual_dram_queue(cpu_id, prefetch_lineaddr ,  current_core_cycle[cpu_id], 3);
                         }
                     }
                 }
 
-                LL_DELETE(head_prefetch, prefetch_el);
+                LL_DELETE(head_prefetch[cpu_id], prefetch_el);
                 free(prefetch_el);
 
                 if(cnt > CACHE_FILL_PREFETCH_THRESHOLD){
@@ -1167,17 +1118,17 @@ void CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way,
 
     unsigned long long int curr_cache_line = addr >> 6;
     dram_queue *dram_el, *dram_temp;
-    LL_FOREACH_SAFE(head_dram, dram_el, dram_temp){
+    LL_FOREACH_SAFE(head_dram[cpu], dram_el, dram_temp){
         if( (dram_el -> cache_line_addr) == curr_cache_line){
-            LL_DELETE(head_dram, dram_el);
+            LL_DELETE(head_dram[cpu], dram_el);
             free(dram_el);
         }
     }
 
     //as we don't have l3 fill, check for lines came from l3, and delete them if they are more than 200 cycles old.
-    LL_FOREACH_SAFE(head_dram, dram_el, dram_temp){
+    LL_FOREACH_SAFE(head_dram[cpu], dram_el, dram_temp){
         if( (dram_el -> flag == 3) &&  ( (current_core_cycle[cpu] - (dram_el -> cycle_added)) > 500 )  ){
-            LL_DELETE(head_dram, dram_el);
+            LL_DELETE(head_dram[cpu], dram_el);
             free(dram_el);
         }
     }
@@ -1193,12 +1144,12 @@ void CACHE::l2c_prefetcher_final_stats()
 }
 
 //dram queue ...
-void insert_virtual_dram_queue(unsigned long long int cache_line_addr, unsigned long long int cycle_added, int flag){
+void insert_virtual_dram_queue(uint8_t cpu, unsigned long long int cache_line_addr, unsigned long long int cycle_added, int flag){
 
     //only 100 elements can be in queue ...
     dram_queue *el;
     int count;
-    LL_COUNT(head_dram, el, count);
+    LL_COUNT(head_dram[cpu], el, count);
 
     if(count >= DRAM_QUEUE){
         return;
@@ -1258,15 +1209,15 @@ void insert_virtual_dram_queue(unsigned long long int cache_line_addr, unsigned 
     element -> cycle_added	 = cycle_added;
     element -> flag		 = flag;
 
-    LL_APPEND(head_dram, element);
+    LL_APPEND(head_dram[cpu], element);
 }
 
-int find_line_virtual_dram_queue(unsigned long long int cache_line){
+int find_line_virtual_dram_queue(uint8_t cpu_id, unsigned long long int cache_line){
 
     dram_queue *el;
     int flag = 0;
 
-    LL_FOREACH(head_dram, el){
+    LL_FOREACH(head_dram[cpu_id], el){
         //line found
         if(  (el -> cache_line_addr) == cache_line ){
             flag = 1;
@@ -1281,7 +1232,7 @@ int find_line_virtual_dram_queue(unsigned long long int cache_line){
     }
 }
 
-int cnt_dram_pending_requests(unsigned long long int page_addr){
+int cnt_dram_pending_requests(uint8_t cpu, unsigned long long int page_addr){
 
     unsigned long long int page_address;
 
@@ -1289,7 +1240,7 @@ int cnt_dram_pending_requests(unsigned long long int page_addr){
 
     int cnt = 0;
 
-    LL_FOREACH(head_dram, el){
+    LL_FOREACH(head_dram[cpu], el){
         page_address = (el -> cache_line_addr) >> 6  ;
         if(page_address == page_addr){
             cnt++;
@@ -1305,7 +1256,7 @@ void insert_prefetch_queue(unsigned long long int base_cache_line_addr, unsigned
     //only 100 elements can be in queue ...
     prefetch_queue *el;
     int count;
-    LL_COUNT(head_prefetch, el, count);
+    LL_COUNT(head_prefetch[cpu_id], el, count);
 
     if(count >= PREFETCH_QUEUE){
         return;
@@ -1323,14 +1274,14 @@ void insert_prefetch_queue(unsigned long long int base_cache_line_addr, unsigned
     element -> cycle_added	 = current_core_cycle[cpu_id];
     element -> degree	 = degree;
 
-    LL_APPEND(head_prefetch, element);
+    LL_APPEND(head_prefetch[cpu_id], element);
 }
 
-void update_degree_prefetch_queue(unsigned long long int cache_line_addr, int degree){
+void update_degree_prefetch_queue(uint8_t cpu, unsigned long long int cache_line_addr, int degree){
 
     prefetch_queue *el;
 
-    LL_FOREACH(head_prefetch, el){
+    LL_FOREACH(head_prefetch[cpu], el){
         //line found
         if(  (el -> prefetch_cache_line_addr)  == cache_line_addr ){
             el -> degree = degree;
@@ -1339,12 +1290,12 @@ void update_degree_prefetch_queue(unsigned long long int cache_line_addr, int de
     }
 }
 
-int find_line_prefetch_queue(unsigned long long int cache_line_addr){
+int find_line_prefetch_queue(uint8_t cpu, unsigned long long int cache_line_addr){
 
     prefetch_queue *el;
     int flag = 0;
 
-    LL_FOREACH(head_prefetch, el){
+    LL_FOREACH(head_prefetch[cpu], el){
         //line found
         if(  (el -> prefetch_cache_line_addr) == cache_line_addr ){
             flag = 1;
@@ -1359,12 +1310,12 @@ int find_line_prefetch_queue(unsigned long long int cache_line_addr){
     }
 }
 
-void delete_line_prefetch_queue(unsigned long long int cache_line_addr){
+void delete_line_prefetch_queue(uint8_t cpu, unsigned long long int cache_line_addr){
 
     prefetch_queue *el, *temp;
-    LL_FOREACH_SAFE(head_prefetch, el, temp){
+    LL_FOREACH_SAFE(head_prefetch[cpu], el, temp){
         if( (el -> prefetch_cache_line_addr) == cache_line_addr){
-            LL_DELETE(head_prefetch, el);
+            LL_DELETE(head_prefetch[cpu], el);
             free(el);
         }
     }
@@ -1383,16 +1334,16 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
     if(!cache_hit){
 
 
-        if(find_line_virtual_dram_queue(cur_cline_address) == 0){
-            insert_virtual_dram_queue(cur_cline_address, current_core_cycle[cpu], 1);
+        if(find_line_virtual_dram_queue(cpu_id, cur_cline_address) == 0){
+            insert_virtual_dram_queue(cpu_id, cur_cline_address, current_core_cycle[cpu], 1);
         }
 
-        if(find_line_prefetch_queue(cur_cline_address) == 1){
-            delete_line_prefetch_queue(cur_cline_address);
+        if(find_line_prefetch_queue(cpu_id, cur_cline_address) == 1){
+            delete_line_prefetch_queue(cpu_id, cur_cline_address);
         }
     }
 
-    static int first_time=1;
+    static uint64_t first_time=1;
 
     if (first_time)
     {
@@ -1431,17 +1382,17 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
         if (offest_delta_prediction !=0)
         {
             unsigned long long int page_addr = (((addr>>6)+offest_delta_prediction)<<6) >> 12;
-            if( (cnt_dram_pending_requests(page_addr) <= ROW_HIT_PER_PAGE)   ){
+            if( (cnt_dram_pending_requests(cpu_id, page_addr) <= ROW_HIT_PER_PAGE)   ){
 
                 if(prefetch_line(0, addr, ((addr>>6)+offest_delta_prediction)<<6, FILL_L2) == 1){
-                    if(find_line_virtual_dram_queue(((addr>>6)+offest_delta_prediction)) == 0){
+                    if(find_line_virtual_dram_queue(cpu_id, ((addr>>6)+offest_delta_prediction)) == 0){
                         //l2 level ...
-                        insert_virtual_dram_queue(((addr>>6)+offest_delta_prediction), current_core_cycle[cpu], 2);
+                        insert_virtual_dram_queue(cpu_id, ((addr>>6)+offest_delta_prediction), current_core_cycle[cpu], 2);
                     }
                 }else if(prefetch_line(0, addr, ((addr>>6)+offest_delta_prediction)<<6, FILL_LLC) == 1){
-                    if(find_line_virtual_dram_queue(((addr>>6)+offest_delta_prediction)) == 0){
+                    if(find_line_virtual_dram_queue(cpu_id, ((addr>>6)+offest_delta_prediction)) == 0){
                         //l3 level ...
-                        insert_virtual_dram_queue(((addr>>6)+offest_delta_prediction), current_core_cycle[cpu], 3);
+                        insert_virtual_dram_queue(cpu_id, ((addr>>6)+offest_delta_prediction), current_core_cycle[cpu], 3);
                     }
                 }
 
@@ -1449,11 +1400,11 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
                 //add to prefetch queue
 
                 //before inserting, check if it already exists ...
-                if(find_line_prefetch_queue(((addr>>6)+offest_delta_prediction)<<6) == 0){
+                if(find_line_prefetch_queue(cpu_id, ((addr>>6)+offest_delta_prediction)<<6) == 0){
                     insert_prefetch_queue(addr >> 6, ((addr>>6)+offest_delta_prediction), 1, cpu);
                 }else{
                     //line is already in queue, update it's degree
-                    update_degree_prefetch_queue( ((addr>>6)+offest_delta_prediction), 1);
+                    update_degree_prefetch_queue(cpu_id, ((addr>>6)+offest_delta_prediction), 1);
                 }
             }
         }
@@ -1509,7 +1460,7 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
             unsigned long long int page_prefetch_addr = prefetch_addr >> 12;
 
             //first check how many pending dram reqeusts are there belong to this page ...
-            if( (cnt_dram_pending_requests(page_prefetch_addr) <= ROW_HIT_PER_PAGE)   ){
+            if( (cnt_dram_pending_requests(cpu_id, page_prefetch_addr) <= ROW_HIT_PER_PAGE)   ){
 
                 //we can issue prefetch ...
                 // to l2
@@ -1518,9 +1469,9 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
 
                     if(prefetch_line(ip, addr, ((addr>>6)+total_delta)<<6, FILL_L2) == 1){
                         //insert to dram queue
-                        if(find_line_virtual_dram_queue(prefetch_lineaddr) == 0){
+                        if(find_line_virtual_dram_queue(cpu_id, prefetch_lineaddr) == 0){
                             //l2 level ...
-                            insert_virtual_dram_queue(prefetch_lineaddr ,  current_core_cycle[cpu], 2);
+                            insert_virtual_dram_queue(cpu_id, prefetch_lineaddr ,  current_core_cycle[cpu], 2);
                         }
 
                     }
@@ -1530,20 +1481,20 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
 
                     if(prefetch_line(ip, addr, ((addr>>6)+total_delta)<<6, FILL_LLC) == 1){
                         //insert to dram queue
-                        if(find_line_virtual_dram_queue(prefetch_lineaddr)    == 0){
+                        if(find_line_virtual_dram_queue(cpu_id, prefetch_lineaddr)    == 0){
                             //l2 level ...
-                            insert_virtual_dram_queue(prefetch_lineaddr ,  current_core_cycle[cpu], 3);
+                            insert_virtual_dram_queue(cpu_id, prefetch_lineaddr ,  current_core_cycle[cpu], 3);
                         }
                     }
                 }
             }else{
                 //we can't issue prefetch, insert to prefetch queue ...
                 //before inserting, check if it already exists ...
-                if(find_line_prefetch_queue(prefetch_lineaddr) == 0){
+                if(find_line_prefetch_queue(cpu_id, prefetch_lineaddr) == 0){
                     insert_prefetch_queue( addr >> 6, prefetch_lineaddr, deg, cpu);
                 }else{
                     //line is already in queue, update it's degree
-                    update_degree_prefetch_queue(prefetch_lineaddr, deg);
+                    update_degree_prefetch_queue(cpu_id, prefetch_lineaddr, deg);
                 }
             }
         }
