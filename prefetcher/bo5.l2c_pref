@@ -179,9 +179,10 @@ void rr_insert(uint8_t cpu, uint64_t lineaddr) {
   if (recent_request[cpu][layer][i] != tag) {
     // replacement event...
     if (tag_life[cpu][layer][i]) {
-      assert(cycle - tag_life[cpu][layer][i] > 0);
-      totalLifeTime[cpu] += (cycle - tag_life[cpu][layer][i]);
-      ++sampledTags[cpu];
+      if (cycle - tag_life[cpu][layer][i] > 0) {
+        totalLifeTime[cpu] += (cycle - tag_life[cpu][layer][i]);
+        ++sampledTags[cpu];
+      }
     }
 
     recent_request[cpu][layer][i] = tag;
