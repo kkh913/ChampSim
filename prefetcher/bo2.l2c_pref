@@ -21,6 +21,8 @@
 
 #define TRUNCATE(x, nbits) (((x) & ((1 << (nbits)) - 1)))
 
+#define DEGREE 1
+
 struct offsets_scores {
   int score[NOFFSETS]; // log2 SCORE_MAX = 5 bits per entry
   int max_score;       // log2 SCORE_MAX = 5 bits
@@ -51,6 +53,7 @@ uint64_t sampledTags[NUM_CPUS];
 uint64_t totalRRHits[NUM_CPUS];
 uint64_t totalRRMisses[NUM_CPUS];
 uint64_t totalFalsePositive[NUM_CPUS];
+uint64_t histoPrefetchDegree[NUM_CPUS][DEGREE+1];
 
 void rr_init(uint8_t cpu);
 int rr_tag(uint64_t lineaddr);
@@ -64,11 +67,12 @@ void os_learn_best_offset(uint8_t cpu, uint64_t lineaddr);
 bool issue_prefetch(uint8_t cpu, uint64_t lineaddr);
 
 void recordOffsetStats(uint8_t cpu);
+void recordPrefetchDegree(uint8_t cpu, int degree);
 
 void CACHE::l2c_prefetcher_initialize() {
   prefetch_offset[cpu] = DEFAULT_OFFSET;
   rr_init(cpu);
-  os_reset(cpu);  
+  os_reset(cpu);
 }
 
 void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip,
@@ -78,16 +82,23 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip,
   if (cache_hit == 0 ||                // cache miss
       (cache_hit == 1 && type == 1)) { //  prefetched hit
 
+    int count_prefetch = 0;
+
     os_learn_best_offset(cpu, cl_address);
     if (issue_prefetch(cpu, cl_address)) {
       uint64_t pf_addr = (cl_address + prefetch_offset[cpu]) << LOGLINE;
       if (MSHR.occupancy < 8) {
-        prefetch_line(ip, addr, pf_addr, FILL_L2);
+        if (prefetch_line(ip, addr, pf_addr, FILL_L2)) {
+          ++count_prefetch;
+        }
       } else {
-        prefetch_line(ip, addr, pf_addr, FILL_LLC);
+        if (prefetch_line(ip, addr, pf_addr, FILL_LLC)) {
+          ++count_prefetch;
+        }
       }
       recordOffsetStats(cpu);
-    }
+      recordPrefetchDegree(cpu, count_prefetch);
+    }    
   }
 }
 
@@ -137,6 +148,10 @@ void CACHE::l2c_prefetcher_final_stats() {
   cout << "CPU" << cpu
        << " Total number of false positive : " << totalFalsePositive[cpu]
        << endl;
+  for (int i = 0; i < DEGREE + 1; ++i) {
+    cout << "CPU" << cpu << " Degree " << i << ": "
+         << histoPrefetchDegree[cpu][i] << endl;
+  }
 }
 
 void rr_init(uint8_t cpu) {
@@ -245,4 +260,8 @@ void recordOffsetStats(uint8_t cpu) {
       break;
     }
   }
+}
+
+void recordPrefetchDegree(uint8_t cpu, int degree) {
+  ++histoPrefetchDegree[cpu][degree];
 }
