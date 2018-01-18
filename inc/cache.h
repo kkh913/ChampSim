@@ -94,6 +94,7 @@ class CACHE : public MEMORY {
              pf_issued,
              pf_useful,
              pf_useless,
+             pf_late,
              pf_fill;
 
     // queues
@@ -150,6 +151,7 @@ class CACHE : public MEMORY {
         pf_issued = 0;
         pf_useful = 0;
         pf_useless = 0;
+        pf_late = 0;
         pf_fill = 0;
     };
 

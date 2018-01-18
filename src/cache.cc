@@ -267,6 +267,7 @@ void CACHE::handle_writeback()
                             // in case request is already returned, we should keep event_cycle and retunred variables
                             MSHR.entry[mshr_index].returned = prior_returned;
                             MSHR.entry[mshr_index].event_cycle = prior_event_cycle;
+                            pf_late++;
                         }
 
                         MSHR_MERGED[WQ.entry[index].type]++;
@@ -587,6 +588,7 @@ void CACHE::handle_read()
                             // in case request is already returned, we should keep event_cycle and retunred variables
                             MSHR.entry[mshr_index].returned = prior_returned;
                             MSHR.entry[mshr_index].event_cycle = prior_event_cycle;
+                            pf_late++;
                         }
 
                         MSHR_MERGED[RQ.entry[index].type]++;
