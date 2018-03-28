@@ -564,7 +564,7 @@ void remove_useless_offset_from_bol(uint8_t cpu, uint16_t id, uint8_t po) {
 #ifdef FILTER
       printf("Remove useless offset id: %03x, po: %d\n", bo_entry.id, bo_entry.po);
 #endif
-      bol[cpu].erase(iter);
+      iter = bol[cpu].erase(iter);
     }
   }
   // printf("after remove_useless_offset_from_bol\n");
@@ -607,7 +607,9 @@ void filter_useless_prefetch_offset(uint8_t cpu, uint64_t cl_address) {
                useless_prefetch_entry.end - useless_prefetch_entry.offset);
 #endif
 
-        remove_useless_offset_from_bol(cpu, id, useless_prefetch_entry.offset - get_next(id));
+        if (useless_prefetch_entry.offset > get_next(id)) {
+            remove_useless_offset_from_bol(cpu, id, useless_prefetch_entry.offset - get_next(id));
+        }
         break;
       }
     }
@@ -641,6 +643,9 @@ void search_prefetch_candidates(uint8_t cpu, uint64_t cl_address) {
 
       // while에 빠졌으니 riter를 증가시켜야 함.
       ++riter;
+      if (degree == DEGREE || riter == bol[cpu].rend()) {
+          break;
+      }
       bo_entry = *riter;
     }
     if (exist) {
@@ -650,7 +655,7 @@ void search_prefetch_candidates(uint8_t cpu, uint64_t cl_address) {
 
   // init에 대한 프리페치를 수행
   // 앞에서 가장 점수가 높은 PO를 찾았었다.
-  if (offset == next) {
+  if (offset == next && degree != DEGREE) {
     if (init + po > next) {
       prefetch_offset_list[cpu][degree].id = id;
       prefetch_offset_list[cpu][degree].po = po - next + init;
