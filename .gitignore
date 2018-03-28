@@ -4,3 +4,4 @@
 *.sh
 *.bak
 bin/
+.DS_Store

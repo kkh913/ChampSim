@@ -109,7 +109,7 @@ void CACHE::handle_fill()
             if (cache_type == IS_L1D)
                 l1d_prefetcher_cache_fill(MSHR.entry[mshr_index].full_addr, set, way, (MSHR.entry[mshr_index].type == PREFETCH) ? 1 : 0, block[set][way].full_addr);
             if  (cache_type == IS_L2C)
-                l2c_prefetcher_cache_fill(MSHR.entry[mshr_index].full_addr, block[set][way].prefetch, way, (MSHR.entry[mshr_index].type == PREFETCH) ? 1 : 0, block[set][way].full_addr);
+                l2c_prefetcher_cache_fill(MSHR.entry[mshr_index].full_addr, block[set][way].prefetch, block[set][way].used, (MSHR.entry[mshr_index].type == PREFETCH) ? 1 : 0, block[set][way].full_addr);
 
             // update replacement policy
             if (cache_type == IS_LLC) {
