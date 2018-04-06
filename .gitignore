@@ -5,3 +5,5 @@
 *.bak
 bin/
 .DS_Store
+*.bk
+prefetcher/backup.l2c_pref
