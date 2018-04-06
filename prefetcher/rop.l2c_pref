@@ -14,7 +14,7 @@
 #define IDSIZE 12
 
 // For Sandbox
-#define NSBES 64
+#define NSBES 128
 
 // For Prefetch Offset Candidate
 #define NPOCS DEGREE
@@ -731,17 +731,17 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
         if (issue_prefetch(cpu, cl_address, degree)) {
           uint64_t pf_addr = (cl_address + prefetch_offset_list[cpu][degree].po) << LOG2_BLOCK_SIZE;
 
-          if (MSHR.occupancy < 16) {
+          // if (MSHR.occupancy < 24) {
             if (prefetch_line(ip, addr, pf_addr, FILL_L2)) {
               insert_prefetch(cpu, id, prefetch_offset_list[cpu][degree].po,
                               cl_address + prefetch_offset_list[cpu][degree].po);
             }
-          } else {
-            if (prefetch_line(ip, addr, pf_addr, FILL_LLC)) {
-              insert_prefetch(cpu, id, prefetch_offset_list[cpu][degree].po,
-                              cl_address + prefetch_offset_list[cpu][degree].po);
-            }
-          }
+          // } else {
+          //   if (prefetch_line(ip, addr, pf_addr, FILL_LLC)) {
+          //     insert_prefetch(cpu, id, prefetch_offset_list[cpu][degree].po,
+          //                     cl_address + prefetch_offset_list[cpu][degree].po);
+          //   }
+          // }
         }
       }
     }
