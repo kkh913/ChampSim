@@ -5,6 +5,7 @@ L1D_PREFETCHER=$2   # prefetcher/*.l1d_pref
 L2C_PREFETCHER=$3   # prefetcher/*.l2c_pref
 LLC_REPLACEMENT=$4  # replacement/*.llc_repl
 NUM_CORE=$5         # tested up to 8-core system
+SMALL_LLC=$6        # small_llc = 512KB
 
 ############## Some useful macros ###############
 BOLD=$(tput bold)
@@ -57,7 +58,14 @@ then
   # sed -i.bak 's/\<DRAM_CHANNELS_LOG2 0\>/DRAM_CHANNELS_LOG2 1/g' inc/champsim.h
   cp inc/champsim.h.${NUM_CORE}core inc/champsim.h
 else
-  echo "${BOLD}Building single-core ChampSim...${NORMAL}"
+  if [ "$SMALL_LLC" != "small_llc" ]
+  then
+    echo "${BOLD}Building single-core ChampSim...${NORMAL}"
+    cp inc/champsim.h.${NUM_CORE}core inc/champsim.h
+  else
+    echo "${BOLD}Building single-core ChampSim with small LLC...${NORMAL}"
+    cp inc/champsim.h.${NUM_CORE}core.small_llc inc/champsim.h
+  fi
 fi
 echo
 
@@ -87,7 +95,14 @@ echo "L1D Prefetcher: ${L1D_PREFETCHER}"
 echo "L2C Prefetcher: ${L2C_PREFETCHER}"
 echo "LLC Replacement: ${LLC_REPLACEMENT}"
 echo "Cores: ${NUM_CORE}"
-BINARY_NAME="${BRANCH}-${L1D_PREFETCHER}-${L2C_PREFETCHER}-${LLC_REPLACEMENT}-${NUM_CORE}core"
+
+if [ "$SMALL_LLC" != "small_llc" ]
+then
+  BINARY_NAME="${BRANCH}-${L1D_PREFETCHER}-${L2C_PREFETCHER}-${LLC_REPLACEMENT}-${NUM_CORE}core"
+else
+  BINARY_NAME="${BRANCH}-${L1D_PREFETCHER}-${L2C_PREFETCHER}-${LLC_REPLACEMENT}-${NUM_CORE}core-small_llc"
+fi
+
 echo "Binary: bin/${BINARY_NAME}${NORMAL}"
 echo ""
 mv bin/champsim bin/${BINARY_NAME}

@@ -46,7 +46,7 @@ extern uint32_t PAGE_TABLE_LATENCY, SWAP_LATENCY;
 #define L1I_SET 64
 #define L1I_WAY 8
 #define L1I_RQ_SIZE 64
-#define L1I_WQ_SIZE 64 
+#define L1I_WQ_SIZE 64
 #define L1I_PQ_SIZE 64
 #define L1I_MSHR_SIZE 8
 #define L1I_LATENCY 1
@@ -55,10 +55,10 @@ extern uint32_t PAGE_TABLE_LATENCY, SWAP_LATENCY;
 #define L1D_SET 64
 #define L1D_WAY 8
 #define L1D_RQ_SIZE 64
-#define L1D_WQ_SIZE 64 
+#define L1D_WQ_SIZE 64
 #define L1D_PQ_SIZE 64
 #define L1D_MSHR_SIZE 8
-#define L1D_LATENCY 4 
+#define L1D_LATENCY 4
 
 // L2 CACHE
 #define L2C_SET 512
@@ -70,7 +70,7 @@ extern uint32_t PAGE_TABLE_LATENCY, SWAP_LATENCY;
 #define L2C_LATENCY 8  // 4 (L1I or L1D) + 8 = 12 cycles
 
 // LAST LEVEL CACHE
-#define LLC_SET NUM_CPUS*2048
+#define LLC_SET NUM_CPUS*LLC_SET_LS
 #define LLC_WAY 16
 #define LLC_RQ_SIZE NUM_CPUS*L2C_MSHR_SIZE //48
 #define LLC_WQ_SIZE NUM_CPUS*L2C_MSHR_SIZE //48
@@ -110,9 +110,9 @@ class CACHE : public MEMORY {
              roi_access[NUM_CPUS][NUM_TYPES],
              roi_hit[NUM_CPUS][NUM_TYPES],
              roi_miss[NUM_CPUS][NUM_TYPES];
-    
+
     // constructor
-    CACHE(string v1, uint32_t v2, int v3, uint32_t v4, uint32_t v5, uint32_t v6, uint32_t v7, uint32_t v8) 
+    CACHE(string v1, uint32_t v2, int v3, uint32_t v4, uint32_t v5, uint32_t v6, uint32_t v7, uint32_t v8)
         : NAME(v1), NUM_SET(v2), NUM_WAY(v3), NUM_LINE(v4), WQ_SIZE(v5), RQ_SIZE(v6), PQ_SIZE(v7), MSHR_SIZE(v8) {
 
         LATENCY = 0;
@@ -120,7 +120,7 @@ class CACHE : public MEMORY {
         // cache block
         block = new BLOCK* [NUM_SET];
         for (uint32_t i=0; i<NUM_SET; i++) {
-            block[i] = new BLOCK[NUM_WAY]; 
+            block[i] = new BLOCK[NUM_WAY];
 
             for (uint32_t j=0; j<NUM_WAY; j++) {
                 block[i][j].lru = j;
