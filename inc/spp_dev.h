@@ -42,7 +42,7 @@
 
 // Global register parameters
 #define GLOBAL_COUNTER_BIT 10
-#define GLOBAL_COUNTER_MAX ((1 << GLOBAL_COUNTER_BIT) - 1) 
+#define GLOBAL_COUNTER_MAX ((1 << GLOBAL_COUNTER_BIT) - 1)
 #define MAX_GHR_ENTRY 8
 
 enum FILTER_REQUEST {SPP_L2C_PREFETCH, SPP_LLC_PREFETCH, L2C_DEMAND, L2C_EVICT}; // Request type for prefetch filter
@@ -73,7 +73,7 @@ class SIGNATURE_TABLE {
             }
     };
 
-    void read_and_update_sig(uint64_t page, uint32_t page_offset, uint32_t &last_sig, uint32_t &curr_sig, int32_t &delta);
+    void read_and_update_sig(uint8_t cpu, uint64_t page, uint32_t page_offset, uint32_t &last_sig, uint32_t &curr_sig, int32_t &delta);
 };
 
 class PATTERN_TABLE {
@@ -100,7 +100,7 @@ class PATTERN_TABLE {
     }
 
     void update_pattern(uint32_t last_sig, int curr_delta),
-         read_pattern(uint32_t curr_sig, int *prefetch_delta, uint32_t *confidence_q, uint32_t &lookahead_way, uint32_t &lookahead_conf, uint32_t &pf_q_tail, uint32_t &depth);
+         read_pattern(uint8_t cpu, uint32_t curr_sig, int *prefetch_delta, uint32_t *confidence_q, uint32_t &lookahead_way, uint32_t &lookahead_conf, uint32_t &pf_q_tail, uint32_t &depth);
 };
 
 class PREFETCH_FILTER {
@@ -121,7 +121,7 @@ class PREFETCH_FILTER {
 
     }
 
-    bool     check(uint64_t pf_addr, FILTER_REQUEST filter_request);
+    bool     check(uint8_t cpu, uint64_t pf_addr, FILTER_REQUEST filter_request);
 };
 
 class GLOBAL_REGISTER {
