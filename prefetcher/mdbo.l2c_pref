@@ -1,0 +1,218 @@
+// Multi Degree Best Offset (MDBO)
+
+#include <list>
+#include "cache.h"
+
+#define NOFFSETS 26
+#define DEFAULT_OFFSET 1
+#define SCORE_MAX 31
+#define ROUND_MAX 127
+#define RRINDEX 8
+#define RRTAG 12
+#define BAD_SCORE 1
+
+#define LOGLINE 6
+
+#define SAMEPAGE(lineaddr1, lineaddr2) ((((lineaddr1) ^ (lineaddr2)) >> 6) == 0)
+
+#define INCREMENT(x, n)  \
+  {                      \
+    x++;                 \
+    if (x == (n)) x = 0; \
+  }
+
+#define TRUNCATE(x, nbits) (((x) & ((1 << (nbits)) - 1)))
+
+#define DEGREE 16
+
+struct offsets_scores {
+  int score[NOFFSETS];      // log2 SCORE_MAX = 5 bits per entry
+  int best_offset[DEGREE];  // SCORE_MAX를 넘는 offset을 여기에 쌓는다.
+  bool exist[NOFFSETS];  // 이미 best_offset에 넣은 오프셋이 best_offset에 입력되지 않도록 하는
+                         // blocker
+  int current_degree;  // best_offset에 쌓여 있는 오프셋 개수
+  int round;           // log2 ROUND_MAX = 7 bits
+  int p;               // log2 NOFFSETS = 6 bits
+};
+
+// There are more offsets defined in this paper. But they are too big to cross
+// page boundaries.
+const int OFFSET[NOFFSETS] = {1,  2,  3,  4,  5,  6,  8,  9,  10, 12, 15, 16, 18,
+                              20, 24, 25, 27, 30, 32, 36, 40, 45, 48, 50, 54, 60};
+
+int prefetch_offset[NUM_CPUS][DEGREE];
+
+int recent_request[NUM_CPUS][1 << RRINDEX];
+
+struct offsets_scores os[NUM_CPUS];
+
+typedef struct _bo_check {
+  int score;
+  int index;
+} bo_check;
+
+void rr_init(uint8_t cpu);
+int rr_tag(uint64_t lineaddr);
+int rr_index(uint64_t lineaddr);
+void rr_insert(uint8_t cpu, uint64_t lineaddr);
+bool rr_hit(uint8_t cpu, uint64_t lineaddr);
+
+void os_reset(uint8_t cpu);
+void os_learn_best_offset(uint8_t cpu, uint64_t lineaddr);
+
+bool issue_prefetch(uint8_t cpu, uint64_t lineaddr, int pos);
+
+void CACHE::l2c_prefetcher_initialize() {
+  prefetch_offset[cpu][0] = DEFAULT_OFFSET;
+
+  for (int i = 1; i < DEGREE; ++i) {
+    prefetch_offset[cpu][i] = 0;
+  }
+
+  rr_init(cpu);
+  os_reset(cpu);
+}
+
+void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type) {
+  uint64_t cl_address = addr >> LOGLINE;
+
+  if (cache_hit == 0 ||                 // cache miss
+      (cache_hit == 1 && type == 1)) {  //  prefetched hit
+
+    os_learn_best_offset(cpu, cl_address);
+
+    for (int pos = 0; pos < DEGREE; ++pos) {
+      if (issue_prefetch(cpu, cl_address, pos)) {
+        uint64_t pf_addr = (cl_address + prefetch_offset[cpu][pos]) << LOGLINE;
+        prefetch_line(ip, addr, pf_addr, FILL_L2);
+      }
+    }
+  }
+}
+
+void CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch,
+                                      uint64_t evicted_addr) {
+  if (prefetch == 0) return;
+
+  uint64_t cl_address = addr >> LOGLINE;
+
+  if (prefetch_offset[cpu][0] == 0) {
+    rr_insert(cpu, cl_address);
+  } else {
+    for (int i = 0; i < DEGREE; ++i) {
+      if (prefetch_offset[cpu][i] != 0) {
+        uint64_t baselineaddr = cl_address - prefetch_offset[cpu][i];
+        if (SAMEPAGE(baselineaddr, cl_address)) {
+          // block address inserted.
+          rr_insert(cpu, baselineaddr);
+        }
+      }
+    }
+  }
+}
+
+void CACHE::l2c_prefetcher_final_stats() {}
+
+void rr_init(uint8_t cpu) {
+  for (int i = 0; i < (1 << RRINDEX); i++) {
+    recent_request[cpu][i] = 0;
+  }
+}
+
+int rr_tag(uint64_t lineaddr) { return TRUNCATE(lineaddr >> RRINDEX, RRTAG); }
+
+int rr_index(uint64_t lineaddr) { return TRUNCATE(lineaddr ^ (lineaddr >> RRINDEX), RRINDEX); }
+
+void rr_insert(uint8_t cpu, uint64_t lineaddr) {
+  int i = rr_index(lineaddr);
+  int tag = rr_tag(lineaddr);
+
+  if (recent_request[cpu][i] != tag) {
+    // replacement event...
+    recent_request[cpu][i] = tag;
+  }
+}
+
+bool rr_hit(uint8_t cpu, uint64_t lineaddr) {
+  int i = rr_index(lineaddr);
+  int tag = rr_tag(lineaddr);
+  bool ret = recent_request[cpu][i] == tag;
+
+  return ret;
+}
+
+void os_reset(uint8_t cpu) {
+  for (int i = 0; i < NOFFSETS; i++) {
+    os[cpu].score[i] = 0;
+    os[cpu].exist[i] = false;
+  }
+
+  for (int i = 0; i < DEGREE; ++i) {
+    os[cpu].best_offset[i] = 0;
+  }
+
+  os[cpu].current_degree = 0;
+  os[cpu].round = 0;
+  os[cpu].p = 0;
+}
+
+void os_learn_best_offset(uint8_t cpu, uint64_t lineaddr) {
+  int testoffset = OFFSET[os[cpu].p];
+
+  uint64_t testlineaddr = lineaddr - testoffset;
+
+  if (SAMEPAGE(lineaddr, testlineaddr) && rr_hit(cpu, testlineaddr)) {
+    ++os[cpu].score[os[cpu].p];
+    if (os[cpu].score[os[cpu].p] == SCORE_MAX && os[cpu].exist[os[cpu].p] == false) {
+      os[cpu].best_offset[os[cpu].current_degree] = testoffset;
+      os[cpu].exist[os[cpu].p] = true;
+      ++os[cpu].current_degree;
+    }
+  }
+
+  if (os[cpu].current_degree == DEGREE) {
+    for (int degree = 0; degree < os[cpu].current_degree; ++degree) {
+      prefetch_offset[cpu][degree] = os[cpu].best_offset[degree];
+      // printf("prefetch_offset[cpu][degree] %d\n", prefetch_offset[cpu][degree]);
+    }
+    for (int degree = os[cpu].current_degree; degree < DEGREE; ++degree) {
+      prefetch_offset[cpu][degree] = 0;
+      // printf("prefetch_offset[cpu][degree] %d\n", prefetch_offset[cpu][degree]);
+    }
+    // printf("\n");
+    os_reset(cpu);
+    return;
+  }
+
+  if (os[cpu].p == (NOFFSETS - 1)) {
+    os[cpu].round++;
+
+    if (os[cpu].round == ROUND_MAX) {
+      for (int degree = 0; degree < os[cpu].current_degree; ++degree) {
+        prefetch_offset[cpu][degree] = os[cpu].best_offset[degree];
+        // printf("prefetch_offset[cpu][degree] %d\n", prefetch_offset[cpu][degree]);
+      }
+      for (int degree = os[cpu].current_degree; degree < DEGREE; ++degree) {
+        prefetch_offset[cpu][degree] = 0;
+        // printf("prefetch_offset[cpu][degree] %d\n", prefetch_offset[cpu][degree]);
+      }
+      // printf("\n");
+      os_reset(cpu);
+      return;
+    }
+  }
+
+  INCREMENT(os[cpu].p, NOFFSETS);  // prepare to test the next offset
+}
+
+bool issue_prefetch(uint8_t cpu, uint64_t lineaddr, int pos) {
+  if (prefetch_offset[cpu][pos] == 0) {
+    return false;
+  }
+
+  if (!SAMEPAGE(lineaddr, lineaddr + prefetch_offset[cpu][pos])) {
+    return false;
+  }
+
+  return true;
+}

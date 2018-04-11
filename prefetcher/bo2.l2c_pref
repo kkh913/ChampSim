@@ -127,7 +127,7 @@ void CACHE::l2c_prefetcher_final_stats() {
   //     ++sampledTags[cpu];
   //   }
   // }
-  // 
+  //
   // cout << endl << "L2C BO Prefetcher final stats" << endl;
   //
   // for (int i = 0; i < NOFFSETS; ++i) {
@@ -237,6 +237,7 @@ void os_learn_best_offset(uint8_t cpu, uint64_t lineaddr) {
         prefetch_offset[cpu] = 0;
       }
       os_reset(cpu);
+      return;
     }
   }
   INCREMENT(os[cpu].p, NOFFSETS); // prepare to test the next offset
