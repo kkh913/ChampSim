@@ -87,15 +87,15 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip,
     os_learn_best_offset(cpu, cl_address);
     if (issue_prefetch(cpu, cl_address)) {
       uint64_t pf_addr = (cl_address + prefetch_offset[cpu]) << LOGLINE;
-      if (MSHR.occupancy < 8) {
+      // if (MSHR.occupancy < 8) {
         if (prefetch_line(ip, addr, pf_addr, FILL_L2)) {
           ++count_prefetch;
         }
-      } else {
-        if (prefetch_line(ip, addr, pf_addr, FILL_LLC)) {
-          ++count_prefetch;
-        }
-      }
+      // } else {
+      //   if (prefetch_line(ip, addr, pf_addr, FILL_LLC)) {
+      //     ++count_prefetch;
+      //   }
+      // }
       recordOffsetStats(cpu);
       recordPrefetchDegree(cpu, count_prefetch);
     }
