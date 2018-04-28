@@ -3,7 +3,7 @@
 #include <random>
 #include <time.h>
 
-#define NUM_MIX  100
+#define NUM_MIX  20
 #define NUM_CPUS 4
 #define NUM_TRACE 20
 
