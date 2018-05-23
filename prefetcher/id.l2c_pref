@@ -1,0 +1,735 @@
+#include <list>
+#include "cache.h"
+
+#define PRINT_INTERVAL 255
+
+#define COMPENSATION
+
+// #define TEST
+// #define MATPLOT
+// #define IDTEST
+// #define POLTEST
+// #define PREFETCHTEST
+
+#ifdef MATPLOT
+#define MIN_CYCLE 0
+#endif
+
+#ifdef POLTEST
+#define MIN_CYCLE 0
+#endif
+
+#define TAGSIZE 12
+#define ADDRSIZE 18
+
+#define TRUNCATE(x, nbits) (((x) & ((1 << (nbits)) - 1)))
+#define SAMEPAGE(lineaddr1, lineaddr2) ((((lineaddr1) ^ (lineaddr2)) >> LOG2_BLOCK_SIZE) == 0)
+
+#define DEGREE 16
+
+// For Page Access History Table
+#define NPAHTES 64
+
+// For ID Table
+// 4, 8 써도 되나 size 부담이 전혀 없기 때문에 봐서 변경
+#define NIDTES 16
+
+// For Access history buffer
+#define NAHBES 64
+
+// For Prefetch Offset Candidate
+#define NPOCS DEGREE
+
+// For Prefetch Offset List
+#define NPOLES 64
+
+// For Prefetch Filter
+#define NPFES 64
+
+struct pahte {
+  uint16_t tag;   // 12 bits
+  uint8_t index;  // ? bits
+  bool valid;     // 1 bit
+  uint8_t lru;    // ? bits
+
+  pahte() : tag(0), index(0), valid(false), lru(0) {}
+};
+
+pahte PAHT[NUM_CPUS][NPAHTES];
+
+struct idte {
+  uint8_t init;
+  uint8_t next;
+  bool valid;
+  uint8_t lru;
+
+  idte() : init(0), next(0), valid(false), lru(0) {}
+};
+
+idte IDT[NUM_CPUS][NIDTES];
+
+struct ahbe {
+  uint8_t index;   // ? bits
+  uint16_t tag;    // 12 bits
+  uint8_t offset;  // 6 bits
+  bool valid;      // 1 bit
+
+  ahbe() : index(0), tag(0), offset(0), valid(true) {}
+};
+
+typedef std::list<ahbe> ahb_list;
+typedef ahb_list::reverse_iterator ahb_riter;
+typedef ahb_list::iterator ahb_iter;
+
+ahb_list AHB[NUM_CPUS];
+
+typedef std::list<uint8_t> offset_list;
+typedef offset_list::reverse_iterator offset_iter;
+
+struct poce {
+  uint8_t po;        // 6 bits
+  uint8_t positive;  // 6 bits
+  uint8_t negative;  // 6 bits
+
+  poce() : po(0), positive(0), negative(0) {}
+};
+
+typedef std::list<poce> poc_list;
+typedef poc_list::reverse_iterator poc_iter;
+
+struct pole {
+  uint8_t index;  // ? bits
+  uint8_t po;     // 6 bits
+  uint8_t score;  // 4 bits
+  bool valid;     // 1 bit
+
+  pole() : index(0), po(0), score(0), valid(true) {}
+};
+
+typedef std::list<pole> po_list;
+typedef po_list::iterator po_iter;
+typedef po_list::reverse_iterator po_riter;
+
+po_list POL[NUM_CPUS];
+
+typedef std::list<uint32_t> pf_list;
+typedef pf_list::reverse_iterator pf_riter;
+
+pf_list PF[NUM_CPUS];
+
+uint8_t prefetch_offset_list[NUM_CPUS][DEGREE];
+uint8_t offset_search_count[NUM_CPUS];
+bool is_hit_on_page_access_history_table[NUM_CPUS];
+uint8_t page_access_history_table_entry[NUM_CPUS];
+uint8_t current_degree[NUM_CPUS];
+
+void test_id_table(uint8_t cpu) {
+  printf("\n");
+  for (int entry = 0; entry < NIDTES; ++entry) {
+    printf("IDT INIT: %d, NEXT: %d, VALID: %s, LRU: %d\n", IDT[cpu][entry].init,
+           IDT[cpu][entry].next, IDT[cpu][entry].valid ? "TRUE" : "FALSE", IDT[cpu][entry].lru);
+  }
+  printf("\n");
+}
+
+void test_access_history_buffer(uint8_t cpu) {
+  printf("\n");
+  for (ahb_riter riter = AHB[cpu].rbegin(); riter != AHB[cpu].rend(); ++riter) {
+    ahbe ahb_entry = *riter;
+    printf("AHB INDEX: %d, TAG: %03x, OFFSET: %d, VALID: %s\n", ahb_entry.index, ahb_entry.tag,
+           ahb_entry.offset, ahb_entry.valid ? "TRUE" : "FALSE");
+  }
+  printf("\n");
+}
+
+void insert_prefetch(uint8_t cpu, uint64_t cl_address) {
+  // cl_address에는 프리페치 주소가 와야한다. 그 프리페치 주소를 tag, offset으로 분리하고 엔트리를
+  // 정의한 뒤 리스트에 밀어넣는다.
+  uint32_t addr = TRUNCATE(cl_address, ADDRSIZE);
+
+  PF[cpu].push_back(addr);
+  if (PF[cpu].size() > NPFES) {
+    PF[cpu].pop_front();
+  }
+}
+
+bool pf_hit(uint8_t cpu, uint64_t cl_address) {
+  // 주소가 있는지 확인하는 것이므로 tag, offset이 확인 대상
+  // id, po와는 무관하다.
+
+  uint32_t addr = TRUNCATE(cl_address, ADDRSIZE);
+  bool exist = false;
+
+  for (pf_riter riter = PF[cpu].rbegin(); riter != PF[cpu].rend(); ++riter) {
+    if (*riter == addr) {
+      exist = true;
+      break;
+    }
+  }
+
+  return exist;
+}
+
+void increase_lru_of_page_access_history_table(uint8_t cpu, uint8_t repl_entry) {
+  if (PAHT[cpu][repl_entry].lru == NPAHTES - 1) {
+    return;
+  }
+
+  uint8_t lru = PAHT[cpu][repl_entry].lru;
+
+  for (int entry = 0; entry < NPAHTES; ++entry) {
+    if (entry == repl_entry) {
+      PAHT[cpu][entry].lru = NPAHTES - 1;
+    } else if (PAHT[cpu][entry].lru > lru) {
+      --PAHT[cpu][entry].lru;
+    }
+  }
+}
+
+void increase_lru_of_id_table(uint8_t cpu, uint8_t repl_entry) {
+  if (IDT[cpu][repl_entry].lru == NIDTES - 1) {
+    return;
+  }
+
+  uint8_t lru = IDT[cpu][repl_entry].lru;
+
+  for (int entry = 0; entry < NIDTES; ++entry) {
+    if (entry == repl_entry) {
+      IDT[cpu][entry].lru = NIDTES - 1;
+    } else if (IDT[cpu][entry].lru > lru) {
+      --IDT[cpu][entry].lru;
+    }
+  }
+}
+
+void notify_evict_id_event(uint8_t cpu, uint8_t index) {
+  // AHB invalidate
+  for (ahb_riter riter = AHB[cpu].rbegin(); riter != AHB[cpu].rend(); ++riter) {
+    ahbe *ahb_entry = &(*riter);
+    if (ahb_entry->index == index) {
+      ahb_entry->valid = false;
+    }
+  }
+
+  // POL invalidate
+  for (po_riter riter = POL[cpu].rbegin(); riter != POL[cpu].rend(); ++riter) {
+    pole *pol_entry = &(*riter);
+    if (pol_entry->index == index) {
+      pol_entry->valid = false;
+    }
+  }
+}
+
+uint8_t get_init_index_from_idt(uint8_t cpu, uint8_t offset) {
+  uint8_t init = offset;
+  uint8_t repl_entry = 0;
+
+  for (int entry = 0; entry < NIDTES; ++entry) {
+    if (IDT[cpu][entry].init == init) {
+      return entry;
+    }
+    if (IDT[cpu][entry].lru == 0) {
+      repl_entry = entry;
+    }
+  }
+
+  // init이 없으므로 lru가 가장 낮은 놈을 교체시킨다. 그러나 해당 entry가 유효한 ID를 가지고 있는
+  // 경우 ID가 달라지는 것이므로 이를 인덱싱하는 것들은 전부 제거해야 한다. 따라서 AHB, POL에
+  // index를 notify해서 해당 ID를 인덱싱하는 엔트리를 삭제 또는 invalidate 해야 한다.
+  if (IDT[cpu][repl_entry].valid) {
+    notify_evict_id_event(cpu, repl_entry);
+  }
+
+  IDT[cpu][repl_entry].init = offset;
+  IDT[cpu][repl_entry].valid = false;
+  increase_lru_of_id_table(cpu, repl_entry);
+
+  return repl_entry;
+}
+
+bool update_next_index_from_idt(uint8_t cpu, uint8_t paht_entry, uint8_t next) {
+  // PAHT[cpu][paht_entry].index가 가리키는 것은 init만 맞는 것이다.
+  // 이게 valid true인지 next가 같은 지 전혀 확인이 안 된 상황이다.
+  uint8_t index = PAHT[cpu][paht_entry].index;
+  uint8_t init = IDT[cpu][index].init;
+
+  // valid가 false이면 next를 offset으로 채우고 valid true하면 끝.
+  if (!IDT[cpu][index].valid) {
+    IDT[cpu][index].next = next;
+    IDT[cpu][index].valid = true;
+    increase_lru_of_id_table(cpu, index);
+    return true;
+  } else {
+    if (IDT[cpu][index].next == next) {
+      increase_lru_of_id_table(cpu, index);
+      return true;
+    } else {
+#ifdef IDTEST
+      printf("IDT next not matched tag %03x, init %d, next %d, offset %d\n",
+             PAHT[cpu][paht_entry].tag, init, IDT[cpu][index].next, next);
+#endif
+
+      for (int entry = 0; entry < NIDTES; ++entry) {
+        if (IDT[cpu][entry].init == init && IDT[cpu][entry].next == next && IDT[cpu][entry].valid) {
+          PAHT[cpu][paht_entry].index = entry;
+          increase_lru_of_id_table(cpu, entry);
+          return true;
+        }
+      }
+
+      // 2차 루프에서는 init이 같은데 valid가 false인 놈을 찾는다. 보이면 그냥 next 덮어쓴다.
+      // 어차피 여기 온 김에 LRU 0인것도 특정하자.
+
+      uint8_t repl_entry = 0;
+
+      for (int entry = 0; entry < NIDTES; ++entry) {
+        if (IDT[cpu][entry].init == init && !IDT[cpu][entry].valid) {
+          IDT[cpu][entry].next = next;
+          IDT[cpu][entry].valid = true;
+          PAHT[cpu][paht_entry].index = entry;
+          increase_lru_of_id_table(cpu, entry);
+          return true;
+        }
+        if (IDT[cpu][entry].lru == 0) {
+          repl_entry = entry;
+        }
+      }
+
+      // 위 loop들에서 해결이 안 나면 새로 생성해야 한다.
+      // 교체되는 놈이 valid이면 역시 참조 중인 정보를 찾아 삭제해야 한다.
+      if (IDT[cpu][repl_entry].valid) {
+        notify_evict_id_event(cpu, repl_entry);
+      }
+
+      IDT[cpu][repl_entry].init = init;
+      IDT[cpu][repl_entry].next = next;
+      IDT[cpu][repl_entry].valid = true;
+      PAHT[cpu][paht_entry].index = repl_entry;
+      increase_lru_of_id_table(cpu, repl_entry);
+
+      return true;
+    }
+  }
+
+  return false;  // assert
+}
+
+bool update_offset_index_from_idt(uint8_t cpu, uint8_t paht_entry, uint8_t offset) {
+  // PAHT[cpu][paht_entry].index가 가리키는 것은 init만 맞는 것이다.
+  // 이게 valid true인지 next가 같은 지 전혀 확인이 안 된 상황이다.
+  uint8_t index = PAHT[cpu][paht_entry].index;
+
+  // 알고리즘 상 이 함수에 들어오면 IDT entry는 무조건 무결성에 의해 valid true이어야 한다.
+  if (!IDT[cpu][index].valid) {
+    return false;
+  }
+
+  uint8_t init = IDT[cpu][index].init;
+
+  // tag가 가리키는 index init보다 offset이 작다? -> ID를 교체한다.
+  if (init >= offset) {
+    IDT[cpu][index].init = offset;
+    IDT[cpu][index].valid = false;
+    return false;
+  }
+
+  // 솔직히 여긴 온 이유는 위의 init 때문이다.
+  // 저 조건만 아니면 LRU만 높이고 나오면 되는 거다.
+  increase_lru_of_id_table(cpu, index);
+  return true;
+}
+
+void push_entry_into_ahb(uint8_t cpu, ahbe &ahb_entry) {
+  AHB[cpu].push_back(ahb_entry);
+  if (AHB[cpu].size() > NAHBES) {
+    AHB[cpu].pop_front();
+  }
+}
+
+void insert_init_access_history_buffer(uint8_t cpu, uint8_t paht_entry) {
+  // AHB에 init 추가를 따로 분리하였다. init인거와 아닌 거를 같이 담기 귀찮아서.
+  // 특히나 init에서는 prefetch를 수행하지 않는다.
+
+  ahbe access_history_buffer_entry;
+  access_history_buffer_entry.index = PAHT[cpu][paht_entry].index;
+  access_history_buffer_entry.tag = PAHT[cpu][paht_entry].tag;
+  access_history_buffer_entry.offset = IDT[cpu][PAHT[cpu][paht_entry].index].init;
+
+  push_entry_into_ahb(cpu, access_history_buffer_entry);
+}
+
+void update_prefetch_offset_candidate_table(uint8_t cpu, poc_list &list, uint8_t po) {
+  bool exist = false;
+
+  for (poc_iter riter = list.rbegin(); riter != list.rend(); ++riter) {
+    poce prefetch_offset_candidate_entry = *riter;
+    if (prefetch_offset_candidate_entry.po == po) {
+      exist = true;
+      break;
+    }
+  }
+
+  if (!exist && list.size() < NPOCS) {
+    poce prefetch_offset_candidate_entry;
+    prefetch_offset_candidate_entry.po = po;
+    prefetch_offset_candidate_entry.positive = 0;
+    prefetch_offset_candidate_entry.negative = 0;
+    list.push_back(prefetch_offset_candidate_entry);
+  }
+}
+
+void test_prefetch_offset_list(uint8_t cpu) {
+  for (po_riter riter = POL[cpu].rbegin(); riter != POL[cpu].rend(); ++riter) {
+    pole po_entry = *riter;
+    printf("POL INDEX: %d, PO: %d, SCORE: %d, VALID: %s\n", po_entry.index, po_entry.po,
+           po_entry.score, po_entry.valid ? "TRUE" : "FALSE");
+  }
+  printf("\n");
+}
+
+void push_entry_into_po_list(uint8_t cpu, pole &po_entry) {
+  POL[cpu].push_back(po_entry);
+  if (POL[cpu].size() > NPOLES) {
+    POL[cpu].pop_front();
+  }
+}
+
+void update_prefetch_offset_list(uint8_t cpu, uint8_t index, uint8_t po, uint8_t score) {
+  bool exist = false;
+
+  // 같은 index, po가 발견되면 스코어 업데이트 후 엔트리를 상위로 이동시켜야 한다.
+  // 엔트리 복사 -> 삭제 -> push_back 하여 상위 이동
+  // 없으면 바로 push_back
+
+  for (po_iter iter = POL[cpu].begin(); iter != POL[cpu].end(); ++iter) {
+    pole po_entry = *iter;
+    if (po_entry.index == index && po_entry.po == po) {
+      pole recent_entry;
+      recent_entry.index = index;
+      recent_entry.po = po;
+      recent_entry.score = score;
+
+      // 엔트리 삭제
+      POL[cpu].erase(iter);
+
+      // 엔트리 최상위에 추가
+      push_entry_into_po_list(cpu, recent_entry);
+
+      exist = true;
+      break;
+    }
+  }
+
+  if (!exist) {
+    pole po_entry;
+    po_entry.index = index;
+    po_entry.po = po;
+    po_entry.score = score;
+    push_entry_into_po_list(cpu, po_entry);
+  }
+}
+
+void insert_access_history_buffer(uint8_t cpu, uint8_t paht_entry, uint8_t offset) {
+  // 여기에서는 무조건 prefetch offset candidate들을 추출하고 POL을 갱신해야 한다.
+  uint8_t index = PAHT[cpu][paht_entry].index;
+  uint16_t tag = PAHT[cpu][paht_entry].tag;
+  offset_list offsets;  //  점수 계산 오프셋 만을 대상으로 하는 임시 저장소
+  poc_list pocs;        // 프리페치 오프셋의 점수가 계산되는 임시 저장소
+
+  ahbe access_history_buffer_entry;
+  access_history_buffer_entry.index = index;
+  access_history_buffer_entry.tag = tag;
+  access_history_buffer_entry.offset = offset;
+
+  push_entry_into_ahb(cpu, access_history_buffer_entry);
+
+#ifdef POLTEST
+  test_id_table(cpu);
+  test_access_history_buffer(cpu);
+#endif
+
+  for (ahb_riter riter = AHB[cpu].rbegin(); riter != AHB[cpu].rend(); ++riter) {
+    ahbe first_entry = *riter;
+    // 현재 접근 주소와 index, tag가 같은 것들을 찾아야 한다.
+    if (first_entry.index == index && first_entry.tag == tag && first_entry.valid) {
+      // 발견된 기록 이전의 것들을 검색하기 위한 루프
+      for (ahb_riter second_riter = riter; second_riter != AHB[cpu].rend(); ++second_riter) {
+        ahbe second_entry = *second_riter;
+        // 양의 값으로 차이가 나는 놈들만 선택하여 PO를 계산한다. 계산된 PO는
+        // POCT에 바로 전송한다.
+        if (second_entry.index == index && second_entry.tag == tag && second_entry.valid &&
+            first_entry.offset > second_entry.offset) {
+          update_prefetch_offset_candidate_table(cpu, pocs,
+                                                 first_entry.offset - second_entry.offset);
+        }
+      }
+      offsets.push_back(first_entry.offset);
+      if (offsets.size() == NPOCS) {
+        break;
+      }
+    }
+  }
+
+#ifdef POLTEST
+  uint64_t cycle = current_core_cycle[cpu];
+  if (cycle > MIN_CYCLE) {
+    printf("Offset List - cycle %lld tag %03x index %d\n", cycle, tag, index);
+    for (offset_iter riter = offsets.rbegin(); riter != offsets.rend(); ++riter) {
+      printf("OFFSET: %d\n", *riter);
+    }
+    printf("\n");
+  }
+#endif
+
+  for (offset_iter riter = offsets.rbegin(); riter != offsets.rend(); ++riter) {
+    uint8_t first_offset = *riter;
+    for (poc_iter poc_riter = pocs.rbegin(); poc_riter != pocs.rend(); ++poc_riter) {
+      poce *prefetch_offset_candidate_entry = &(*poc_riter);
+
+      bool exist = false;
+      uint8_t second_offset = first_offset + prefetch_offset_candidate_entry->po;
+      if (second_offset < BLOCK_SIZE) {
+        for (offset_iter second_riter = riter; second_riter != offsets.rend(); ++second_riter) {
+          if (*second_riter == second_offset) {
+            exist = true;
+            break;
+          }
+        }
+        if (exist) {
+          ++prefetch_offset_candidate_entry->positive;
+        } else {
+          ++prefetch_offset_candidate_entry->negative;
+        }
+      }
+    }
+  }
+
+#ifdef POLTEST
+  printf("after calculation\n");
+  for (poc_iter riter = pocs.rbegin(); riter != pocs.rend(); ++riter) {
+    poce prefetch_offset_candidate_entry = *riter;
+    printf("PO: %d, P: %d, N: %d\n", prefetch_offset_candidate_entry.po,
+           prefetch_offset_candidate_entry.positive, prefetch_offset_candidate_entry.negative);
+  }
+  printf("\n");
+#endif
+
+  for (poc_iter riter = pocs.rbegin(); riter != pocs.rend(); ++riter) {
+    poce prefetch_offset_candidate_entry = *riter;
+    if (prefetch_offset_candidate_entry.positive > prefetch_offset_candidate_entry.negative) {
+      update_prefetch_offset_list(
+          cpu, index, prefetch_offset_candidate_entry.po,
+          prefetch_offset_candidate_entry.positive - prefetch_offset_candidate_entry.negative);
+    }
+  }
+#ifdef POLTEST
+  if (cycle > MIN_CYCLE) {
+    test_prefetch_offset_list(cpu);
+  }
+#endif
+}
+
+void train_access_pattern(uint8_t cpu, uint64_t cl_address) {
+  uint8_t offset = TRUNCATE(cl_address, LOG2_BLOCK_SIZE);
+  uint64_t page = cl_address >> LOG2_BLOCK_SIZE;
+  uint16_t tag = TRUNCATE(page, TAGSIZE);
+  uint8_t repl_entry = 0;
+  bool exist = false;
+
+  ++offset_search_count[cpu];
+
+  for (int entry = 0; entry < NPAHTES; ++entry) {
+    if (PAHT[cpu][entry].tag == tag) {
+      // tag match & valid true라는 것은 이 접근이 같은 페이지의 두 번째 접근이라는 것을 의미.
+      // ID 생��을 위한 프로세스를 수행해야 한다.
+      if (!PAHT[cpu][entry].valid) {
+        PAHT[cpu][entry].valid = true;
+
+        if (!update_next_index_from_idt(cpu, entry, offset)) {
+          // 처음 next를 받고 ID를 찾는 것이므로 update_next_index_from_idt는 무조건 true
+          assert(0);
+        }
+        // init을 AHB에 넣을 수 있어야 한다. 어떻게??
+        insert_init_access_history_buffer(cpu, entry);
+      } else {
+        if (!update_offset_index_from_idt(cpu, entry, offset)) {
+          PAHT[cpu][entry].valid = false;
+        }
+      }
+
+      if (PAHT[cpu][entry].valid) {
+        insert_access_history_buffer(cpu, entry, offset);
+        increase_lru_of_page_access_history_table(cpu, entry);
+        is_hit_on_page_access_history_table[cpu] = true;
+        page_access_history_table_entry[cpu] = entry;
+      }
+
+      // 어쨌건 tag는 찾았으니 exist는 true이다.
+      exist = true;
+      break;
+    }
+    if (PAHT[cpu][entry].lru == 0) {
+      repl_entry = entry;
+    }
+  }
+
+  if (!exist) {
+    PAHT[cpu][repl_entry].tag = tag;
+    PAHT[cpu][repl_entry].index = get_init_index_from_idt(cpu, offset);
+    PAHT[cpu][repl_entry].valid = false;
+    increase_lru_of_page_access_history_table(cpu, repl_entry);
+  }
+
+  if (offset_search_count[cpu] == PRINT_INTERVAL) {
+    offset_search_count[cpu] = 0;    
+#ifdef TEST
+    exit(0);
+#endif
+  }
+}
+
+void search_prefetch_candidates(uint8_t cpu, uint64_t cl_address) {
+  uint8_t offset = TRUNCATE(cl_address, LOG2_BLOCK_SIZE);
+  uint8_t entry = page_access_history_table_entry[cpu];
+  uint8_t index = PAHT[cpu][entry].index;
+
+  uint8_t init = IDT[cpu][index].init;
+  uint8_t next = IDT[cpu][index].next;
+  uint8_t degree = 0;
+
+#ifdef PREFETCHTEST
+  printf("SEARCH PO OFFSET: %d, ENTRY: %d, INDEX: %d, INIT: %d, NEXT: %d\n", offset, entry, index,
+         init, next);
+#endif
+
+  bool exist = false;
+
+#ifdef COMPENSATION
+  uint8_t po = 0;
+  uint8_t max = 0;
+#endif
+
+  for (po_riter riter = POL[cpu].rbegin(); riter != POL[cpu].rend(); ++riter) {
+    pole po_entry = *riter;
+    while (po_entry.index == index) {
+      exist = true;
+#ifdef COMPENSATION
+      if (max < po_entry.score) {
+        max = po_entry.score;
+        po = po_entry.po;
+      }
+#endif
+      prefetch_offset_list[cpu][degree] = po_entry.po;
+
+#ifdef PREFETCHTEST
+      printf("prefetch_offset_list[cpu][%d]: %d\n", degree, po_entry.po);
+#endif
+      ++degree;
+      // while에 빠졌으니 riter를 증가시켜야 함.
+      ++riter;
+      if (degree == DEGREE || riter == POL[cpu].rend()) {
+        break;
+      }
+      po_entry = *riter;
+    }
+    if (exist) {
+      break;
+    }
+  }
+
+#ifdef COMPENSATION
+  if (offset == next && degree != DEGREE) {
+    if (init + po > next) {
+      prefetch_offset_list[cpu][degree] = po - next + init;
+#ifdef PREFETCHTEST
+      printf("prefetch_offset_list[cpu][%d]: %d\n", degree, po - next + init);
+#endif
+      ++degree;
+    }
+  }
+#endif
+
+  current_degree[cpu] = degree;
+}
+
+bool issue_prefetch(uint8_t cpu, uint64_t lineaddr, uint8_t degree) {
+  if (prefetch_offset_list[cpu][degree] == 0) {
+    return false;
+  }
+
+  if (!SAMEPAGE(lineaddr, lineaddr + prefetch_offset_list[cpu][degree])) {
+    return false;
+  }
+
+  if (pf_hit(cpu, lineaddr + prefetch_offset_list[cpu][degree])) {
+    return false;
+  }
+  return true;
+}
+
+void CACHE::l2c_prefetcher_initialize() {
+  //  LRU 초기화
+  for (int entry = 0; entry < NPAHTES; ++entry) {
+    PAHT[cpu][entry].lru = entry;
+  }
+
+  for (int entry = 0; entry < NIDTES; ++entry) {
+    IDT[cpu][entry].lru = entry;
+  }
+}
+
+void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type) {
+  is_hit_on_page_access_history_table[cpu] = false;
+  current_degree[cpu] = 0;
+  uint64_t cl_address = addr >> LOG2_BLOCK_SIZE;
+  bool miss = (cache_hit == 0) ? true : false;
+  bool prefetch_hit = (cache_hit == 1 && type == 1) ? true : false;
+
+#ifdef MATPLOT
+  uint64_t cycle = current_core_cycle[cpu];
+  if (cycle > MIN_CYCLE) {
+    if (!cache_hit) {
+      cout << cycle << ",0," << cl_address << ",0,0,0" << endl;
+    } else {
+      if (type == 1) {
+        cout << cycle << ",0,0," << cl_address << ",0,0" << endl;
+      } else {
+        cout << cycle << "," << cl_address << ",0,0,0,0" << endl;
+      }
+    }
+  }
+#endif
+
+  if (miss || prefetch_hit) {
+    train_access_pattern(cpu, cl_address);
+
+    if (is_hit_on_page_access_history_table[cpu]) {
+      search_prefetch_candidates(cpu, cl_address);
+      for (int degree = 0; degree < current_degree[cpu]; ++degree) {
+        if (issue_prefetch(cpu, cl_address, degree)) {
+          uint64_t pf_addr = (cl_address + prefetch_offset_list[cpu][degree]) << LOG2_BLOCK_SIZE;
+          if (prefetch_line(ip, addr, pf_addr, FILL_L2)) {
+            insert_prefetch(cpu, cl_address + prefetch_offset_list[cpu][degree]);
+          }
+        }
+      }
+    }
+  }
+}
+
+void CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch,
+                                      uint64_t evicted_addr) {
+#ifdef MATPLOT
+  if (prefetch) {
+    uint64_t cl_address = addr >> LOG2_BLOCK_SIZE;
+    uint64_t cycle = current_core_cycle[cpu];
+    if (cycle > MIN_CYCLE) {
+      cout << cycle << ",0,0,0," << cl_address << ",0" << endl;
+    }
+  }
+#endif
+}
+
+void CACHE::l2c_prefetcher_final_stats() {
+
+}
