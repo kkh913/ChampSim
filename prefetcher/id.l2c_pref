@@ -32,7 +32,7 @@
 
 // For ID Table
 // 4, 8 써도 되나 size 부담이 전혀 없기 때문에 봐서 변경
-#define NIDTES 16
+#define NIDTES 8
 
 // For Access history buffer
 #define NAHBES 64
@@ -581,7 +581,7 @@ void train_access_pattern(uint8_t cpu, uint64_t cl_address) {
   }
 
   if (offset_search_count[cpu] == PRINT_INTERVAL) {
-    offset_search_count[cpu] = 0;    
+    offset_search_count[cpu] = 0;
 #ifdef TEST
     exit(0);
 #endif
@@ -730,6 +730,4 @@ void CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way,
 #endif
 }
 
-void CACHE::l2c_prefetcher_final_stats() {
-
-}
+void CACHE::l2c_prefetcher_final_stats() {}
