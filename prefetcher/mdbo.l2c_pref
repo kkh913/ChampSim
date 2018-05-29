@@ -5,7 +5,7 @@
 
 // #define MATPLOT
 #ifdef MATPLOT
-#define MIN_CYCLE 70000000
+#define MIN_CYCLE 0
 #endif
 
 #define NOFFSETS 26
@@ -28,7 +28,7 @@
 
 #define TRUNCATE(x, nbits) (((x) & ((1 << (nbits)) - 1)))
 
-#define DEGREE 16
+#define DEGREE 4
 
 struct offsets_scores {
   int score[NOFFSETS];       // log2 SCORE_MAX = 5 bits per entry
