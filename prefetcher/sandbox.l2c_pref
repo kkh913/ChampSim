@@ -1,6 +1,12 @@
 #include <list>
 #include "cache.h"
 
+#define MATPLOT
+
+#ifdef MATPLOT
+#define MIN_CYCLE 0
+#endif
+
 #define BFSIZE 256
 #define THRESH_1DEGREE 256
 #define THRESH_2DEGREE 512
@@ -233,6 +239,22 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
 
   bool miss = (cache_hit == 0) ? true : false;
   bool prefetch_hit = (cache_hit == 1 && type == 1) ? true : false;
+
+#ifdef MATPLOT
+  uint64_t cycle = current_core_cycle[cpu];
+  if (cycle > MIN_CYCLE) {
+    if (!cache_hit) {
+      cout << "CPU" << cpu << "," << cycle << ",0," << cl_address << ",0,0" << endl;
+    } else {
+      if (type == 1) {
+        cout << "CPU" << cpu << "," << cycle << ",0,0," << cl_address << ",0" << endl;
+      } else {
+        cout << "CPU" << cpu << "," << cycle << "," << cl_address << ",0,0,0" << endl;
+      }
+    }
+  }
+#endif
+
   if (miss || prefetch_hit) {
     learn_best_offset(cpu, cl_address);
 
@@ -253,6 +275,16 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
 }
 
 void CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch,
-                                      uint64_t evicted_addr) {}
+                                      uint64_t evicted_addr) {
+#ifdef MATPLOT
+  if (prefetch) {
+    uint64_t cl_address = addr >> LOG2_BLOCK_SIZE;
+    uint64_t cycle = current_core_cycle[cpu];
+    if (cycle > MIN_CYCLE) {
+      cout << "CPU" << cpu << "," << cycle << ",0,0,0," << cl_address << endl;
+    }
+  }
+#endif
+}
 
 void CACHE::l2c_prefetcher_final_stats() {}
