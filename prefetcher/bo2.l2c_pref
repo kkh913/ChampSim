@@ -1,5 +1,11 @@
 #include "cache.h"
 
+#define MATPLOT
+
+#ifdef MATPLOT
+#define MIN_CYCLE 0
+#endif
+
 #define NOFFSETS 26
 #define DEFAULT_OFFSET 1
 #define SCORE_MAX 31
@@ -12,11 +18,10 @@
 
 #define SAMEPAGE(lineaddr1, lineaddr2) ((((lineaddr1) ^ (lineaddr2)) >> 6) == 0)
 
-#define INCREMENT(x, n)                                                        \
-  {                                                                            \
-    x++;                                                                       \
-    if (x == (n))                                                              \
-      x = 0;                                                                   \
+#define INCREMENT(x, n)  \
+  {                      \
+    x++;                 \
+    if (x == (n)) x = 0; \
   }
 
 #define TRUNCATE(x, nbits) (((x) & ((1 << (nbits)) - 1)))
@@ -24,18 +29,17 @@
 #define DEGREE 1
 
 struct offsets_scores {
-  int score[NOFFSETS]; // log2 SCORE_MAX = 5 bits per entry
-  int max_score;       // log2 SCORE_MAX = 5 bits
-  int best_offset;     // 7 bits (6-bit value + 1 sign bit)
-  int round;           // log2 ROUND_MAX = 7 bits
-  int p;               // log2 NOFFSETS = 6 bits
+  int score[NOFFSETS];  // log2 SCORE_MAX = 5 bits per entry
+  int max_score;        // log2 SCORE_MAX = 5 bits
+  int best_offset;      // 7 bits (6-bit value + 1 sign bit)
+  int round;            // log2 ROUND_MAX = 7 bits
+  int p;                // log2 NOFFSETS = 6 bits
 };
 
 // There are more offsets defined in this paper. But they are too big to cross
 // page boundaries.
-const int OFFSET[NOFFSETS] = {1,  2,  3,  4,  5,  6,  8,  9,  10,
-                              12, 15, 16, 18, 20, 24, 25, 27, 30,
-                              32, 36, 40, 45, 48, 50, 54, 60};
+const int OFFSET[NOFFSETS] = {1,  2,  3,  4,  5,  6,  8,  9,  10, 12, 15, 16, 18,
+                              20, 24, 25, 27, 30, 32, 36, 40, 45, 48, 50, 54, 60};
 
 int prefetch_offset[NUM_CPUS];
 
@@ -53,7 +57,7 @@ uint64_t sampledTags[NUM_CPUS];
 uint64_t totalRRHits[NUM_CPUS];
 uint64_t totalRRMisses[NUM_CPUS];
 uint64_t totalFalsePositive[NUM_CPUS];
-uint64_t histoPrefetchDegree[NUM_CPUS][DEGREE+1];
+uint64_t histoPrefetchDegree[NUM_CPUS][DEGREE + 1];
 
 void rr_init(uint8_t cpu);
 int rr_tag(uint64_t lineaddr);
@@ -75,12 +79,26 @@ void CACHE::l2c_prefetcher_initialize() {
   os_reset(cpu);
 }
 
-void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip,
-                                   uint8_t cache_hit, uint8_t type) {
+void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type) {
   uint64_t cl_address = addr >> LOGLINE;
 
-  if (cache_hit == 0 ||                // cache miss
-      (cache_hit == 1 && type == 1)) { //  prefetched hit
+#ifdef MATPLOT
+  uint64_t cycle = current_core_cycle[cpu];
+  if (cycle > MIN_CYCLE) {
+    if (!cache_hit) {
+      cout << cycle << ",0," << cl_address << ",0,0" << endl;
+    } else {
+      if (type == 1) {
+        cout << cycle << ",0,0," << cl_address << ",0" << endl;
+      } else {
+        cout << cycle << "," << cl_address << ",0,0,0" << endl;
+      }
+    }
+  }
+#endif
+
+  if (cache_hit == 0 ||                 // cache miss
+      (cache_hit == 1 && type == 1)) {  //  prefetched hit
 
     int count_prefetch = 0;
 
@@ -88,9 +106,9 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip,
     if (issue_prefetch(cpu, cl_address)) {
       uint64_t pf_addr = (cl_address + prefetch_offset[cpu]) << LOGLINE;
       // if (MSHR.occupancy < 8) {
-        if (prefetch_line(ip, addr, pf_addr, FILL_L2)) {
-          ++count_prefetch;
-        }
+      if (prefetch_line(ip, addr, pf_addr, FILL_L2)) {
+        ++count_prefetch;
+      }
       // } else {
       //   if (prefetch_line(ip, addr, pf_addr, FILL_LLC)) {
       //     ++count_prefetch;
@@ -102,10 +120,19 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip,
   }
 }
 
-void CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way,
-                                      uint8_t prefetch, uint64_t evicted_addr) {
-  if (prefetch == 0)
-    return;
+void CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch,
+                                      uint64_t evicted_addr) {
+  if (prefetch == 0) return;
+
+#ifdef MATPLOT
+  if (prefetch) {
+    uint64_t cl_address = addr >> LOG2_BLOCK_SIZE;
+    uint64_t cycle = current_core_cycle[cpu];
+    if (cycle > MIN_CYCLE) {
+      cout << cycle << ",0,0,0," << cl_address << endl;
+    }
+  }
+#endif
 
   uint64_t cl_address = addr >> LOGLINE;
   uint64_t baselineaddr = cl_address - prefetch_offset[cpu];
@@ -163,9 +190,7 @@ void rr_init(uint8_t cpu) {
 
 int rr_tag(uint64_t lineaddr) { return TRUNCATE(lineaddr >> RRINDEX, RRTAG); }
 
-int rr_index(uint64_t lineaddr) {
-  return TRUNCATE(lineaddr ^ (lineaddr >> RRINDEX), RRINDEX);
-}
+int rr_index(uint64_t lineaddr) { return TRUNCATE(lineaddr ^ (lineaddr >> RRINDEX), RRINDEX); }
 
 void rr_insert(uint8_t cpu, uint64_t lineaddr) {
   int i = rr_index(lineaddr);
@@ -184,7 +209,7 @@ void rr_insert(uint8_t cpu, uint64_t lineaddr) {
     tag_life[cpu][i] = cycle;
   }
 
-  real_addr[cpu][i] = lineaddr; //  for statistics...
+  real_addr[cpu][i] = lineaddr;  //  for statistics...
 }
 
 bool rr_hit(uint8_t cpu, uint64_t lineaddr) {
@@ -192,7 +217,7 @@ bool rr_hit(uint8_t cpu, uint64_t lineaddr) {
   int tag = rr_tag(lineaddr);
   bool ret = recent_request[cpu][i] == tag;
 
-  if (ret) { //  RR hit
+  if (ret) {  //  RR hit
     if (real_addr[cpu][i] != lineaddr) {
       ++totalFalsePositive[cpu];
     }
@@ -231,8 +256,7 @@ void os_learn_best_offset(uint8_t cpu, uint64_t lineaddr) {
     os[cpu].round++;
 
     if ((os[cpu].max_score == SCORE_MAX) || (os[cpu].round == ROUND_MAX)) {
-      prefetch_offset[cpu] =
-          (os[cpu].best_offset != 0) ? os[cpu].best_offset : DEFAULT_OFFSET;
+      prefetch_offset[cpu] = (os[cpu].best_offset != 0) ? os[cpu].best_offset : DEFAULT_OFFSET;
       if (os[cpu].max_score <= BAD_SCORE) {
         prefetch_offset[cpu] = 0;
       }
@@ -240,7 +264,7 @@ void os_learn_best_offset(uint8_t cpu, uint64_t lineaddr) {
       return;
     }
   }
-  INCREMENT(os[cpu].p, NOFFSETS); // prepare to test the next offset
+  INCREMENT(os[cpu].p, NOFFSETS);  // prepare to test the next offset
 }
 
 bool issue_prefetch(uint8_t cpu, uint64_t lineaddr) {
@@ -263,6 +287,4 @@ void recordOffsetStats(uint8_t cpu) {
   }
 }
 
-void recordPrefetchDegree(uint8_t cpu, int degree) {
-  ++histoPrefetchDegree[cpu][degree];
-}
+void recordPrefetchDegree(uint8_t cpu, int degree) { ++histoPrefetchDegree[cpu][degree]; }

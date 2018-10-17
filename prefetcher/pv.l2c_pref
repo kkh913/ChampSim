@@ -1,0 +1,491 @@
+#include "bloom.h"
+#include "cache.h"
+
+#define DEGREE 8
+
+#define SAMEPAGE(lineaddr1, lineaddr2) ((((lineaddr1) ^ (lineaddr2)) >> 6) == 0)
+
+#define INCREMENT(x, n)  \
+  {                      \
+    x++;                 \
+    if (x == (n)) x = 0; \
+  }
+
+#define TRUNCATE(x, nbits) (((x) & ((1 << (nbits)) - 1)))
+
+// #define MATPLOT
+#ifdef MATPLOT
+#define MIN_CYCLE 0
+#endif
+
+#define ADDR_BFSIZE 256
+#define OFFSET_BFSIZE 128
+#define NUMHASH 7
+#define ADDR_SIZE 3
+#define ID_PAIR_SIZE 2
+#define ADDR_BF_REFRESH 214
+
+#define NOFFSETS 26
+#define DEFAULT_OFFSET 1
+#define SCORE_MAX 31
+#define ROUND_MAX 127
+#define BAD_SCORE 1
+
+#define NPAHTES 64
+#define NIDTES 8
+
+#define TAGSIZE (8 * ADDR_SIZE) - LOG2_BLOCK_SIZE
+
+BLOOM addr_bf[NUM_CPUS];
+BLOOM offset_bf[NUM_CPUS][NIDTES];
+
+struct pahte {
+  uint32_t tag;  // 18 bits
+  int id;        // ? bits
+  int init;      // 6 bits
+  bool valid;    // 1 bit
+  uint8_t lru;   // 2 bits
+
+  pahte() : tag(0), id(-1), init(0), valid(false), lru(0) {}
+};
+
+pahte PAHT[NUM_CPUS][NPAHTES];
+
+struct idte {
+  int id;
+  bool valid;
+  uint8_t lru;
+
+  idte() : id(0), valid(false), lru(0) {}
+};
+
+idte IDT[NUM_CPUS][NIDTES];
+
+struct offset_info {
+  uint8_t pos;
+  int8_t offset;
+};
+
+struct offsets_scores {
+  int score[NOFFSETS];       // log2 SCORE_MAX = 5 bits per entry
+  int best_offsets[DEGREE];  // SCORE_MAX를 넘는 offset을 여기에 쌓는다.
+  bool exist[NOFFSETS];  // 이미 best_offset에 넣은 오프셋이 best_offset에 입력되지 않도록 하는
+                         // blocker
+
+  int max_score;  // log2 SCORE_MAX = 5 bits ROUND_MAX에서 PO가 없으면 max_score보고 사용 여부 결정
+  int best_offset;
+  int current_degree;  // best_offset에 쌓여 있는 오프셋 개수
+  int round;           // log2 ROUND_MAX = 7 bits
+  int p;               // log2 NOFFSETS = 6 bits
+};
+
+// There are more offsets defined in this paper. But they are too big to cross
+// page boundaries.
+const int OFFSET[NOFFSETS] = {1,  2,  3,  4,  5,  6,  8,  9,  10, 12, 15, 16, 18,
+                              20, 24, 25, 27, 30, 32, 36, 40, 45, 48, 50, 54, 60};
+
+int prefetch_offset[NUM_CPUS][DEGREE];
+
+uint16_t addr_insert_count[NUM_CPUS];
+
+struct offsets_scores os[NUM_CPUS];
+
+void invalidate_page_access_history_table(uint8_t cpu, int id) {
+  for (int entry = 0; entry < NPAHTES; ++entry) {
+    if (PAHT[cpu][entry].id == id) {
+      PAHT[cpu][entry].tag = 0;
+      PAHT[cpu][entry].id = -1;
+      PAHT[cpu][entry].init = 0;
+      PAHT[cpu][entry].valid = false;
+    }
+  }
+}
+
+void increase_lru_of_page_access_history_table(uint8_t cpu, int repl_entry) {
+  if (PAHT[cpu][repl_entry].lru == NPAHTES - 1) {
+    return;
+  }
+
+  uint8_t lru = PAHT[cpu][repl_entry].lru;
+
+  for (int entry = 0; entry < NPAHTES; ++entry) {
+    if (entry == repl_entry) {
+      PAHT[cpu][entry].lru = NPAHTES - 1;
+    } else if (PAHT[cpu][entry].lru > lru) {
+      --PAHT[cpu][entry].lru;
+    }
+  }
+}
+
+void increase_lru_of_id_table(uint8_t cpu, int repl_entry) {
+  if (IDT[cpu][repl_entry].lru == NIDTES - 1) {
+    return;
+  }
+
+  uint8_t lru = IDT[cpu][repl_entry].lru;
+
+  for (int entry = 0; entry < NIDTES; ++entry) {
+    if (entry == repl_entry) {
+      IDT[cpu][entry].lru = NIDTES - 1;
+    } else if (IDT[cpu][entry].lru > lru) {
+      --IDT[cpu][entry].lru;
+    }
+  }
+}
+
+void os_reset(uint8_t cpu) {
+  for (int i = 0; i < NOFFSETS; i++) {
+    os[cpu].score[i] = 0;
+    os[cpu].exist[i] = false;
+  }
+
+  for (int i = 0; i < DEGREE; ++i) {
+    os[cpu].best_offsets[i] = 0;
+  }
+
+  os[cpu].max_score = 0;
+  os[cpu].best_offset = 0;
+  os[cpu].current_degree = 0;
+  os[cpu].round = 0;
+  os[cpu].p = 0;
+}
+
+void addr_bf_insert(uint8_t cpu, uint64_t cl_address) {
+  if (addr_insert_count[cpu] == ADDR_BF_REFRESH) {
+    bloom_free(&addr_bf[cpu]);
+    addr_insert_count[cpu] = 0;
+  }
+
+  uint8_t buffer[ADDR_SIZE];
+  for (int size = 0; size < ADDR_SIZE; ++size) {
+    buffer[size] = TRUNCATE(cl_address >> (8 * size), 8);
+  }
+
+  if (!bloom_check(&addr_bf[cpu], buffer, ADDR_SIZE)) {
+    bloom_add(&addr_bf[cpu], buffer, ADDR_SIZE);
+    ++addr_insert_count[cpu];
+  }
+}
+
+bool addr_bf_hit(uint8_t cpu, uint64_t cl_address) {
+  uint8_t buffer[ADDR_SIZE];
+  for (int size = 0; size < ADDR_SIZE; ++size) {
+    buffer[size] = TRUNCATE(cl_address >> (8 * size), 8);
+  }
+
+  return bloom_check(&addr_bf[cpu], buffer, ADDR_SIZE);
+}
+
+void offset_bf_insert(uint8_t cpu, int id, int pos, int offset) {
+  uint8_t buffer[ID_PAIR_SIZE];
+  struct offset_info oi;
+  oi.pos = pos;
+  oi.offset = offset;
+
+  // printf("offset_bf_insert id %d, pos %d, offset %d\n", oi.id, oi.pos, oi.offset);
+
+  memcpy(buffer, &oi, ID_PAIR_SIZE);
+
+  bloom_add(&offset_bf[cpu][id], buffer, ID_PAIR_SIZE);
+}
+
+bool offset_bf_hit(uint8_t cpu, int id, int pos, int offset) {
+  uint8_t buffer[ID_PAIR_SIZE];
+  struct offset_info oi;
+  oi.pos = pos;
+  oi.offset = offset;
+
+  memcpy(buffer, &oi, ID_PAIR_SIZE);
+
+  return bloom_check(&offset_bf[cpu][id], buffer, ID_PAIR_SIZE);
+}
+
+void update_id_table(uint8_t cpu, int paht_entry, int offset) {
+  // 이미 기존에 offset - init이 존재하고 있으면 생성이 필요없다.
+  // 없는 것만 생성을 해 주어야 한다.
+  bool exist = false;
+  int repl_entry = 0;
+
+  int id = offset - PAHT[cpu][paht_entry].init;
+
+  // printf("ID is %d\n", id);
+
+  for (int entry = 0; entry < NIDTES; ++entry) {
+    if (IDT[cpu][entry].id == id) {
+      PAHT[cpu][paht_entry].id = entry;
+      increase_lru_of_id_table(cpu, entry);
+      // printf("ID already existed. PAHT[cpu][paht_entry].id %d\n", PAHT[cpu][paht_entry].id);
+      exist = true;
+      break;
+    }
+    if (IDT[cpu][entry].lru == 0) {
+      repl_entry = entry;
+    }
+  }
+
+  if (!exist) {
+    // 없으니 새로 생성한다. 만약 생성 중에 기존 엔트리의 교체가 일어나면 offset_bf의 데이터는
+    // 무효화해야 한다.
+
+    // printf("ID didn't exist. need to gen.\n");
+
+    if (IDT[cpu][repl_entry].valid) {
+      // printf("replacement id event. bloom_free\n");
+      invalidate_page_access_history_table(cpu, repl_entry);
+      bloom_free(&offset_bf[cpu][repl_entry]);
+    }
+
+    IDT[cpu][repl_entry].id = id;
+    IDT[cpu][repl_entry].valid = true;
+    increase_lru_of_id_table(cpu, repl_entry);
+  }
+
+  // debug print
+  // for (int entry = 0; entry < NIDTES; ++entry) {
+  //   printf("IDT[%d] ID: %d, V: %s, LRU: %d\n", entry, IDT[cpu][entry].id,
+  //          IDT[cpu][entry].valid ? "TRUE" : "FALSE", IDT[cpu][entry].lru);
+  // }
+}
+
+int find_page_id(uint8_t cpu, uint64_t cl_address) {
+  int offset = TRUNCATE(cl_address, LOG2_BLOCK_SIZE);
+  uint64_t page = cl_address >> LOG2_BLOCK_SIZE;
+  uint32_t tag = TRUNCATE(page, TAGSIZE);
+  bool exist = false;
+  int repl_entry = 0;
+  int id = -1;
+
+  // printf("find_page_id for tag %04x, offset %d\n", tag, offset);
+
+  for (int entry = 0; entry < NPAHTES; ++entry) {
+    if (PAHT[cpu][entry].tag == tag) {
+      if (!PAHT[cpu][entry].valid) {
+        // tag가 같은데 valid가 false라는 것은 이번 접근이 해당 페이지에 대한 두 번째 접근임을
+        // 의미한다. 따라서 저장된 paht entry 정보를 이용하여 page id를 생성하기 위한 작업을
+        // 수행한다.
+        // 그러나 접근 주소 차이가 없는 것은 사용할 수 없다. 따라서 접근 주소 차이가 0이면
+        // pass한다.
+
+        // printf("PAHT valid false. second access.\n");
+
+        if (PAHT[cpu][entry].init != offset) {
+          // printf("PAHT[cpu][entry].init %d, update_id_table.\n", PAHT[cpu][entry].init);
+          update_id_table(cpu, entry, offset);
+          PAHT[cpu][entry].valid = true;
+        }
+      }
+      id = PAHT[cpu][entry].id;
+      // printf("PAHT tag matched id %d\n", id);
+      increase_lru_of_page_access_history_table(cpu, entry);
+      exist = true;
+      break;
+    }
+    if (PAHT[cpu][entry].lru == 0) {
+      repl_entry = entry;
+    }
+  }
+
+  if (!exist) {
+    // printf("tag is not matched. need to gen.\n");
+    PAHT[cpu][repl_entry].tag = tag;
+    PAHT[cpu][repl_entry].id = -1;
+    PAHT[cpu][repl_entry].init = offset;
+    PAHT[cpu][repl_entry].valid = false;
+    increase_lru_of_page_access_history_table(cpu, repl_entry);
+  }
+
+  return id;
+}
+
+void os_learn_best_offset(uint8_t cpu, uint64_t lineaddr, int id) {
+  int testoffset = OFFSET[os[cpu].p];
+
+  uint64_t testlineaddr = lineaddr - testoffset;
+
+  if (SAMEPAGE(lineaddr, testlineaddr) && addr_bf_hit(cpu, testlineaddr)) {
+    ++os[cpu].score[os[cpu].p];
+
+    if (id >= 0) {
+      // printf("ID exists for this page.\n");
+      offset_bf_insert(cpu, id, TRUNCATE(testlineaddr, LOG2_BLOCK_SIZE), testoffset);
+    }
+
+    if (os[cpu].score[os[cpu].p] >= os[cpu].max_score) {
+      os[cpu].max_score = os[cpu].score[os[cpu].p];
+      os[cpu].best_offset = testoffset;
+    }
+
+    if (os[cpu].score[os[cpu].p] == SCORE_MAX && os[cpu].exist[os[cpu].p] == false) {
+      os[cpu].best_offsets[os[cpu].current_degree] = testoffset;
+      os[cpu].exist[os[cpu].p] = true;
+      ++os[cpu].current_degree;
+    }
+  }
+
+  if (os[cpu].current_degree == DEGREE) {
+    for (int degree = 0; degree < os[cpu].current_degree; ++degree) {
+      prefetch_offset[cpu][degree] = os[cpu].best_offsets[degree];
+      // printf("prefetch_offset[cpu][degree] %d\n", prefetch_offset[cpu][degree]);
+    }
+    for (int degree = os[cpu].current_degree; degree < DEGREE; ++degree) {
+      prefetch_offset[cpu][degree] = 0;
+      // printf("prefetch_offset[cpu][degree] %d\n", prefetch_offset[cpu][degree]);
+    }
+    // printf("\n");
+
+    os_reset(cpu);
+    return;
+  }
+
+  if (os[cpu].p == (NOFFSETS - 1)) {
+    os[cpu].round++;
+
+    if (os[cpu].round == ROUND_MAX) {
+      for (int degree = 0; degree < os[cpu].current_degree; ++degree) {
+        prefetch_offset[cpu][degree] = os[cpu].best_offsets[degree];
+        // printf("prefetch_offset[cpu][degree] %d\n", prefetch_offset[cpu][degree]);
+      }
+      for (int degree = os[cpu].current_degree; degree < DEGREE; ++degree) {
+        prefetch_offset[cpu][degree] = 0;
+        // printf("prefetch_offset[cpu][degree] %d\n", prefetch_offset[cpu][degree]);
+      }
+
+      if (os[cpu].current_degree == 0) {
+        prefetch_offset[cpu][0] = (os[cpu].max_score > BAD_SCORE) ? DEFAULT_OFFSET : 0;
+      }
+
+      // printf("\n");
+      os_reset(cpu);
+      return;
+    }
+  }
+
+  INCREMENT(os[cpu].p, NOFFSETS);  // prepare to test the next offset
+}
+
+bool issue_prefetch(uint8_t cpu, uint64_t lineaddr, int pos, int id) {
+  if (prefetch_offset[cpu][pos] == 0) {
+    return false;
+  }
+
+  if (!SAMEPAGE(lineaddr, lineaddr + prefetch_offset[cpu][pos])) {
+    return false;
+  }
+
+  int src = TRUNCATE(lineaddr, LOG2_BLOCK_SIZE);
+
+  // id가 있을 때만 필터링이 가능하니
+  if (id >= 0 && !offset_bf_hit(cpu, id, src, prefetch_offset[cpu][pos])) {
+    // printf("On %d, prefetch offset %d is filtered due to the mismatch of page id %d\n", src,
+    //        prefetch_offset[cpu][pos], id);
+    return false;
+  }
+
+  return true;
+}
+
+void CACHE::l2c_prefetcher_initialize() {
+  cout << "ADDR_BFSIZE: " << ADDR_BFSIZE << endl;
+  cout << "OFFSET_BFSIZE: " << OFFSET_BFSIZE << endl;
+  cout << "NUMHASH: " << NUMHASH << endl;
+  cout << "ID_PAIR_SIZE: " << ID_PAIR_SIZE << endl;
+  cout << "ADDR_BF_REFRESH: " << ADDR_BF_REFRESH << endl;
+  cout << "ADDR_SIZE: " << ADDR_SIZE << endl;
+  cout << "NOFFSETS: " << NOFFSETS << endl;
+  cout << "DEFAULT_OFFSET: " << DEFAULT_OFFSET << endl;
+  cout << "SCORE_MAX: " << SCORE_MAX << endl;
+  cout << "ROUND_MAX: " << ROUND_MAX << endl;
+  cout << "BAD_SCORE: " << BAD_SCORE << endl;
+  cout << "NPAHTES: " << NPAHTES << endl;
+  cout << "NIDTES: " << NIDTES << endl;
+  cout << "TAGSIZE: " << TAGSIZE << endl;
+
+  cout << "DEGREE: " << DEGREE << endl;
+
+  prefetch_offset[cpu][0] = DEFAULT_OFFSET;
+
+  for (int i = 1; i < DEGREE; ++i) {
+    prefetch_offset[cpu][i] = 0;
+  }
+
+  bloom_init(&addr_bf[cpu], ADDR_BFSIZE, NUMHASH);
+
+  for (int entry = 0; entry < NIDTES; ++entry) {
+    bloom_init(&offset_bf[cpu][entry], OFFSET_BFSIZE, NUMHASH);
+  }
+
+  os_reset(cpu);
+
+  //  LRU 초기화
+  for (int entry = 0; entry < NPAHTES; ++entry) {
+    PAHT[cpu][entry].lru = entry;
+  }
+
+  for (int entry = 0; entry < NIDTES; ++entry) {
+    IDT[cpu][entry].lru = entry;
+  }
+}
+
+void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type) {
+  uint64_t cl_address = addr >> LOG2_BLOCK_SIZE;
+  bool miss = (cache_hit == 0) ? true : false;
+  bool prefetch_hit = (cache_hit == 1 && type == 1) ? true : false;
+
+#ifdef MATPLOT
+  uint64_t cycle = current_core_cycle[cpu];
+  if (cycle > MIN_CYCLE) {
+    if (!cache_hit) {
+      cout << cycle << ",0," << cl_address << ",0,0" << endl;
+    } else {
+      if (type == 1) {
+        cout << cycle << ",0,0," << cl_address << ",0" << endl;
+      } else {
+        cout << cycle << "," << cl_address << ",0,0,0" << endl;
+      }
+    }
+  }
+#endif
+
+  if (miss || prefetch_hit) {
+    int id = find_page_id(cpu, cl_address);
+
+    os_learn_best_offset(cpu, cl_address, id);
+
+    // int degree = 0;
+
+    for (int pos = 0; pos < DEGREE; ++pos) {
+      if (issue_prefetch(cpu, cl_address, pos, id)) {
+        // printf("Prefetch %d id %d\n", prefetch_offset[cpu][pos], id);
+        uint64_t pf_addr = (cl_address + prefetch_offset[cpu][pos]) << LOG2_BLOCK_SIZE;
+
+        if (id != -1) {
+          prefetch_line(ip, addr, pf_addr, FILL_L2);
+        } else {
+          prefetch_line(ip, addr, pf_addr, FILL_LLC);
+        }
+        // ++degree;
+      }
+    }
+
+    // if (degree == 0) {
+    //   printf("no prefetching... \n");
+    // }
+
+    addr_bf_insert(cpu, cl_address);
+  }
+}
+
+void CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch,
+                                      uint64_t evicted_addr) {
+#ifdef MATPLOT
+  if (prefetch) {
+    uint64_t cl_address = addr >> LOG2_BLOCK_SIZE;
+    uint64_t cycle = current_core_cycle[cpu];
+    if (cycle > MIN_CYCLE) {
+      cout << cycle << ",0,0,0," << cl_address << endl;
+    }
+  }
+#endif
+}
+
+void CACHE::l2c_prefetcher_final_stats() {}
