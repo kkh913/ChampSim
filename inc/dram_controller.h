@@ -83,7 +83,8 @@ class MEMORY_CONTROLLER : public MEMORY {
 
     void return_data(PACKET *packet),
          operate(),
-         increment_WQ_FULL(uint64_t address);
+         increment_WQ_FULL(uint64_t address),
+		 add_l2_prefetch_hit(uint64_t address); // added for removing LLC useless by L2 useful
 
     uint32_t get_occupancy(uint8_t queue_type, uint64_t address),
              get_size(uint8_t queue_type, uint64_t address);

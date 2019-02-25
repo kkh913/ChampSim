@@ -94,6 +94,7 @@ class CACHE : public MEMORY {
              pf_issued,
              pf_useful,
              pf_useless,
+             pf_useless_by_pf_hit, // added for removing LLC useless by L2 useful
              pf_late,
              pf_fill;
 
@@ -151,6 +152,7 @@ class CACHE : public MEMORY {
         pf_issued = 0;
         pf_useful = 0;
         pf_useless = 0;
+        pf_useless_by_pf_hit = 0;
         pf_late = 0;
         pf_fill = 0;
     };
@@ -169,7 +171,8 @@ class CACHE : public MEMORY {
 
     void return_data(PACKET *packet),
          operate(),
-         increment_WQ_FULL(uint64_t address);
+         increment_WQ_FULL(uint64_t address),
+         add_l2_prefetch_hit(uint64_t address); // added for removing LLC useless by L2 useful
 
     uint32_t get_occupancy(uint8_t queue_type, uint64_t address),
              get_size(uint8_t queue_type, uint64_t address);

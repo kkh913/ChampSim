@@ -1,0 +1,218 @@
+// Multi Degree Offset Prefetcher (MDOP)
+#include "cache.h"
+
+// Macros
+#define SAMEPAGE(lineaddr1, lineaddr2) ((((lineaddr1) ^ (lineaddr2)) >> 6) == 0)
+
+#define INCREMENT(x, n)  \
+  {                      \
+    x++;                 \
+    if (x == (n)) x = 0; \
+  }
+
+#define TRUNCATE(x, nbits) (((x) & ((1 << (nbits)) - 1)))
+
+// Global parameters
+#define DEGREE 4
+#define NOFFSETS 26
+#define DEFAULT_OFFSET 1
+#define SCORE_MAX 31
+#define ROUND_MAX 127
+#define RRINDEX 8
+#define RRTAG 12
+#define BAD_SCORE 1
+#define LOGLINE 6
+
+// There are more offsets defined in BOP. But they are too many to cross page boundaries. Thus, we truncated the offset list to fit on a 64 KB page.
+const int OFFSET[NOFFSETS] = {1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 15, 16, 18, 20, 24, 25, 27, 30, 32, 36, 40, 45, 48, 50, 54, 60};
+
+// Multi degree offset prefetcher parameters
+struct offsets_scores {
+  int  score[NOFFSETS];            // log2 SCORE_MAX = 5 bits per entry
+  int  candidate_offsets[DEGREE];  // 6 bits * DEGREE = 48 bits
+  bool exist[NOFFSETS];            // 26 bits. flag bits whether most offset exists in candidate_offsets[i].
+
+  int max_score;       // log2 SCORE_MAX = 5 bits
+  int current_degree;  // number of offsets in candidate_offsets[DEGREE]
+  int round;           // log2 ROUND_MAX = 7 bits
+  int p;               // log2 NOFFSETS = 5 bits
+};
+struct offsets_scores os[NUM_CPUS];
+
+int most_offsets[NUM_CPUS][DEGREE];
+int recent_request[NUM_CPUS][1 << RRINDEX];  // RR table
+
+void rr_init(uint8_t cpu);
+int  rr_tag(uint64_t lineaddr);
+int  rr_index(uint64_t lineaddr);
+void rr_insert(uint8_t cpu, uint64_t lineaddr);
+bool rr_hit(uint8_t cpu, uint64_t lineaddr);
+
+void os_reset(uint8_t cpu);
+void os_learn_best_offset(uint8_t cpu, uint64_t lineaddr);
+
+bool issue_prefetch(uint8_t cpu, uint64_t lineaddr, int pos);
+
+void CACHE::l2c_prefetcher_initialize() {
+  most_offsets[cpu][0] = DEFAULT_OFFSET;
+
+  for (int i = 1; i < DEGREE; ++i) {
+    most_offsets[cpu][i] = 0;
+  }
+
+  rr_init(cpu);
+  os_reset(cpu);
+}
+
+void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type) {
+  uint64_t cl_address = addr >> LOGLINE;
+
+  if (cache_hit == 0 ||                 // cache miss
+      (cache_hit == 1 && type == 1)) {  //  prefetched hit
+
+    os_learn_best_offset(cpu, cl_address);
+
+    for (int pos = 0; pos < DEGREE; ++pos) {
+      if (issue_prefetch(cpu, cl_address, pos)) {
+        uint64_t pf_addr = (cl_address + most_offsets[cpu][pos]) << LOGLINE;
+        prefetch_line(ip, addr, pf_addr, FILL_L2);
+      }
+    }
+  }
+
+  uint64_t baselineaddr = cl_address - most_offsets[cpu][0];
+  if (SAMEPAGE(baselineaddr, cl_address)) {
+    rr_insert(cpu, baselineaddr);
+  }
+}
+
+void CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr) {
+  if (prefetch == 0) return;
+
+  // X: block address of prefetch response
+  // O: test offset
+  // For prefetch timeliness, check X - O, which is a block address of a previous access.
+  uint64_t cl_address   = addr >> LOGLINE;
+  uint64_t baselineaddr = cl_address - most_offsets[cpu][0];
+  if (SAMEPAGE(baselineaddr, cl_address)) {
+    rr_insert(cpu, baselineaddr);
+  }
+}
+
+void CACHE::l2c_prefetcher_final_stats() { cout << endl << "L2C MDOP Prefetcher final stats" << endl; }
+
+void rr_init(uint8_t cpu) {
+  for (int i = 0; i < (1 << RRINDEX); i++) {
+    recent_request[cpu][i] = 0;
+  }
+}
+
+int rr_tag(uint64_t lineaddr) { return TRUNCATE(lineaddr >> RRINDEX, RRTAG); }
+
+// simple xor hashing.
+int rr_index(uint64_t lineaddr) { return TRUNCATE(lineaddr ^ (lineaddr >> RRINDEX), RRINDEX); }
+
+void rr_insert(uint8_t cpu, uint64_t lineaddr) {
+  int i   = rr_index(lineaddr);
+  int tag = rr_tag(lineaddr);
+
+  recent_request[cpu][i] = tag;
+}
+
+bool rr_hit(uint8_t cpu, uint64_t lineaddr) {
+  int i   = rr_index(lineaddr);
+  int tag = rr_tag(lineaddr);
+  return recent_request[cpu][i] == tag;
+}
+
+void os_reset(uint8_t cpu) {
+  for (int i = 0; i < NOFFSETS; i++) {
+    os[cpu].score[i] = 0;
+    os[cpu].exist[i] = false;
+  }
+
+  for (int i = 0; i < DEGREE; ++i) {
+    os[cpu].candidate_offsets[i] = 0;
+  }
+
+  os[cpu].max_score      = 0;
+  os[cpu].current_degree = 0;
+  os[cpu].round          = 0;
+  os[cpu].p              = 0;
+}
+
+void os_learn_best_offset(uint8_t cpu, uint64_t lineaddr) {
+  // X: block address of prefetch trigger event
+  // O: test offset
+  // For prefetch timeliness, check X - O, which is a block address of a previous access.
+  int testoffset = OFFSET[os[cpu].p];  // round-robin manner
+
+  uint64_t testlineaddr = lineaddr - testoffset;
+
+  if (SAMEPAGE(lineaddr, testlineaddr) && rr_hit(cpu, testlineaddr)) {  // if X - O hits in RR
+
+    ++os[cpu].score[os[cpu].p];  // increase a score of O by 1
+
+    if (os[cpu].score[os[cpu].p] > SCORE_MAX) {
+      os[cpu].score[os[cpu].p] = SCORE_MAX;
+    }
+
+    if (os[cpu].score[os[cpu].p] >= os[cpu].max_score) {
+      os[cpu].max_score = os[cpu].score[os[cpu].p];
+    }
+
+    if (os[cpu].score[os[cpu].p] == SCORE_MAX && os[cpu].exist[os[cpu].p] == false) {
+      os[cpu].candidate_offsets[os[cpu].current_degree] = testoffset;  // O is a candidate
+      os[cpu].exist[os[cpu].p]                          = true;
+      ++os[cpu].current_degree;
+    }
+  }
+
+  if (os[cpu].current_degree == DEGREE) {  // if the number of candidates is DEGREE, use all candidate offsets next
+    for (int degree = 0; degree < os[cpu].current_degree; ++degree) {
+      most_offsets[cpu][degree] = os[cpu].candidate_offsets[degree];
+    }
+    for (int degree = os[cpu].current_degree; degree < DEGREE; ++degree) {
+      most_offsets[cpu][degree] = 0;
+    }
+
+    os_reset(cpu);  // learning is over. initializaion
+    return;
+  }
+
+  if (os[cpu].p == (NOFFSETS - 1)) {  // round-robin is over
+    os[cpu].round++;
+
+    if (os[cpu].round == ROUND_MAX) {  // If don't fill the candidate offsets by DEGREE during ROUND_MAX, use candidate offsets found
+      for (int degree = 0; degree < os[cpu].current_degree; ++degree) {
+        most_offsets[cpu][degree] = os[cpu].candidate_offsets[degree];
+      }
+      for (int degree = os[cpu].current_degree; degree < DEGREE; ++degree) {
+        most_offsets[cpu][degree] = 0;
+      }
+
+      if (os[cpu].current_degree == 0) {
+        most_offsets[cpu][0] = (os[cpu].max_score > BAD_SCORE) ? DEFAULT_OFFSET : 0;
+      }
+
+      os_reset(cpu);  // learning is over. initializaion
+      return;
+    }
+  }
+
+  INCREMENT(os[cpu].p, NOFFSETS);  // prepare to test the next offset
+}
+
+bool issue_prefetch(uint8_t cpu, uint64_t lineaddr, int pos) {
+  // there are no most offsets
+  if (most_offsets[cpu][pos] == 0) {
+    return false;
+  }
+
+  // page crossing
+  if (!SAMEPAGE(lineaddr, lineaddr + most_offsets[cpu][pos])) {
+    return false;
+  }
+
+  return true;
+}

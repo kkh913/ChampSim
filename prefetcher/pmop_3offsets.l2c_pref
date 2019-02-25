@@ -1,4 +1,4 @@
-// Per-page Most Offset Prefetcher (PMOP); page-ID 1 offset
+// Per-page Most Offset Prefetcher (PMOP); page-ID 3 offsets
 #include "bloom.h"
 #include "cache.h"
 
@@ -27,26 +27,34 @@ const int OFFSET[NOFFSETS] = {1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 15, 16, 18, 20, 24
 // Page access history table parameters
 #define NPAHTES 64
 #define TAGSIZE (8 * ADDR_SIZE) - LOG2_BLOCK_SIZE
-struct pahte {     // Page access history table entries
-  uint32_t tag;    // 18 bits
-  int      id;     // 3 bits
-  int      init;   // 6 bits
-  bool     valid;  // 1 bit
-  uint8_t  lru;    // 6 bits
+struct pahte {
+  uint32_t tag;     // 18 bits
+  int      id;      // ? bits
+  int      init;    // 6 bits
+  int      second;  // 6 bits
+  int      third;   // 6 bits
+  bool     valid;   // 1 bit
+  bool     valid2;  // 1 bit
+  bool     valid3;  // 1 bit
+  uint8_t  lru;     // 6 bits
 
-  pahte() : tag(0), id(-1), init(0), valid(false), lru(0) {}
+  pahte() : tag(0), id(-1), init(0), second(0), third(0), valid(false), valid2(false), valid3(false), lru(0) {}
 };
+
 pahte PAHT[NUM_CPUS][NPAHTES];
 
 // Page ID table parameters
 #define NIDTES 8
 struct idte {     // Page ID table entries
   int     id;     // 7 bits
+  int     id2;    // 7 bits
+  int     id3;    // 7 bits
   bool    valid;  // 1 bit
   uint8_t lru;    // 3 bits
 
-  idte() : id(0), valid(false), lru(0) {}
+  idte() : id(0), id2(0), id3(0), valid(false), lru(0) {}
 };
+
 idte IDT[NUM_CPUS][NIDTES];
 
 // Address bloom filter
@@ -63,16 +71,17 @@ struct offset_info {  // filter data
   int8_t  offset;
 };
 
-// Most offset prefetcher parameters
 struct offsets_scores {
   int  score[NOFFSETS];            // log2 SCORE_MAX = 5 bits per entry
-  int  candidate_offsets[DEGREE];  // 6 bits * DEGREE = 48 bits
-  bool exist[NOFFSETS];            // 26 bits. flag bits whether most offset exists in candidate_offsets[i].
+  int  candidate_offsets[DEGREE];  // SCORE_MAX를 넘는 offset을 여기에 쌓는다.
+  bool exist[NOFFSETS];            // 이미 best_offset에 넣은 오프셋이 best_offset에 입력되지 않도록 하는
+                                   // blocker
 
-  int max_score;       // log2 SCORE_MAX = 5 bits
-  int current_degree;  // number of offsets in candidate_offsets[DEGREE]
+  int max_score;  // log2 SCORE_MAX = 5 bits ROUND_MAX에서 PO가 없으면 max_score보고 사용 여부 결정
+  int best_offset;
+  int current_degree;  // best_offset에 쌓여 있는 오프셋 개수
   int round;           // log2 ROUND_MAX = 7 bits
-  int p;               // log2 NOFFSETS = 5 bits
+  int p;               // log2 NOFFSETS = 6 bits
 };
 int most_offsets[NUM_CPUS][DEGREE];  // offset 6 bits * 8 degrees = 48 bits
 
@@ -121,6 +130,7 @@ void os_reset(uint8_t cpu) {
   }
 
   os[cpu].max_score      = 0;
+  os[cpu].best_offset    = 0;
   os[cpu].current_degree = 0;
   os[cpu].round          = 0;
   os[cpu].p              = 0;
@@ -176,7 +186,7 @@ bool offset_bf_hit(uint8_t cpu, int id, int pos, int offset) {
   return bloom_check(&offset_bf[cpu][id], buffer, ID_PAIR_SIZE);
 }
 
-void update_id_table(uint8_t cpu, int paht_entry, int offset) {
+void update_id_table_first(uint8_t cpu, int paht_entry, int offset) {
   bool exist      = false;
   int  repl_entry = 0;
   int  id         = offset - PAHT[cpu][paht_entry].init;
@@ -206,6 +216,76 @@ void update_id_table(uint8_t cpu, int paht_entry, int offset) {
   }
 }
 
+void update_id_table_second(uint8_t cpu, int paht_entry, int offset) {
+  bool exist      = false;
+  int  repl_entry = 0;
+
+  int id  = IDT[cpu][PAHT[cpu][paht_entry].id].id;
+  int id2 = offset - PAHT[cpu][paht_entry].second;
+
+  // Find page-ID
+  for (int entry = 0; entry < NIDTES; ++entry) {
+    if (IDT[cpu][entry].id == id && IDT[cpu][entry].id2 == id2) {  // if exists both id and id2
+      PAHT[cpu][paht_entry].id = entry;
+      increase_lru_of_id_table(cpu, entry);
+      exist = true;
+      break;
+    }
+    if (IDT[cpu][entry].lru == NIDTES - 1) {  // check a victim
+      repl_entry = entry;
+    }
+  }
+
+  if (!exist) {
+    if (IDT[cpu][repl_entry].valid) {           // page ID already exists
+      bloom_free(&offset_bf[cpu][repl_entry]);  // emtpy OB
+    }
+
+    // add a new entry.
+    IDT[cpu][repl_entry].id    = id;
+    IDT[cpu][repl_entry].id2   = id2;
+    IDT[cpu][repl_entry].valid = true;
+    increase_lru_of_id_table(cpu, repl_entry);
+  }
+}
+
+void update_id_table_third(uint8_t cpu, int paht_entry, int offset) {
+  bool exist      = false;
+  int  repl_entry = 0;
+
+  int id  = IDT[cpu][PAHT[cpu][paht_entry].id].id;
+  int id2 = IDT[cpu][PAHT[cpu][paht_entry].id].id2;
+  int id3 = offset - PAHT[cpu][paht_entry].third;
+
+  // printf("ID is %d\n", id);
+
+  for (int entry = 0; entry < NIDTES; ++entry) {
+    if (IDT[cpu][entry].id == id && IDT[cpu][entry].id2 == id2 && IDT[cpu][entry].id3 == id3) {  // if exists  id,id2, and id3
+      PAHT[cpu][paht_entry].id = entry;
+      increase_lru_of_id_table(cpu, entry);
+      // printf("ID already existed. PAHT[cpu][paht_entry].id %d\n", PAHT[cpu][paht_entry].id);
+      exist = true;
+      break;
+    }
+    if (IDT[cpu][entry].lru == NIDTES - 1) {  // check a victim
+      repl_entry = entry;
+    }
+  }
+
+  if (!exist) {
+    if (IDT[cpu][repl_entry].valid) {           // page ID already exists
+      bloom_free(&offset_bf[cpu][repl_entry]);  // emtpy OB
+    }
+
+    // add a new entry.
+    IDT[cpu][repl_entry].id    = id;
+    IDT[cpu][repl_entry].id2   = id2;
+    IDT[cpu][repl_entry].id3   = id3;
+    IDT[cpu][repl_entry].valid = true;
+    increase_lru_of_id_table(cpu, repl_entry);
+  }
+}
+
 int find_page_id(uint8_t cpu, uint64_t cl_address) {
   int      offset     = TRUNCATE(cl_address, LOG2_BLOCK_SIZE);
   uint64_t page       = cl_address >> LOG2_BLOCK_SIZE;
@@ -214,15 +294,28 @@ int find_page_id(uint8_t cpu, uint64_t cl_address) {
   int      repl_entry = 0;
   int      id         = -1;
 
-  // Find page-ID in PAHT.
+  // printf("find_page_id for tag %04x, offset %d\n", tag, offset);
+
   for (int entry = 0; entry < NPAHTES; ++entry) {
     if (PAHT[cpu][entry].tag == tag) {
-      if (!PAHT[cpu][entry].valid) {            // second access in this page
-        if (PAHT[cpu][entry].init != offset) {  // second access is different from first access
-          update_id_table(cpu, entry, offset);  // make page ID.
-          PAHT[cpu][entry].valid = true;
+      if (!PAHT[cpu][entry].valid) {                  // second access in this page
+        if (PAHT[cpu][entry].init != offset) {        // second access is different from first access
+          update_id_table_first(cpu, entry, offset);  // make page ID
+          PAHT[cpu][entry].second = offset;
+          PAHT[cpu][entry].valid  = true;
+        }
+      } else if (!PAHT[cpu][entry].valid2) {           // third access in this page
+        if (PAHT[cpu][entry].second != offset) {       // third access is different from second access
+          update_id_table_second(cpu, entry, offset);  // make page ID2
+          PAHT[cpu][entry].valid2 = true;
+        }
+      } else if (!PAHT[cpu][entry].valid3) {          // fourth access in this page
+        if (PAHT[cpu][entry].third != offset) {       // fourth access is different from third access
+          update_id_table_third(cpu, entry, offset);  // make page ID3
+          PAHT[cpu][entry].valid3 = true;
         }
       }
+
       id = PAHT[cpu][entry].id;
       increase_lru_of_page_access_history_table(cpu, entry);
       exist = true;
@@ -235,10 +328,14 @@ int find_page_id(uint8_t cpu, uint64_t cl_address) {
 
   if (!exist) {
     // Add a new entry
-    PAHT[cpu][repl_entry].tag   = tag;
-    PAHT[cpu][repl_entry].id    = -1;
-    PAHT[cpu][repl_entry].init  = offset;
-    PAHT[cpu][repl_entry].valid = false;
+    PAHT[cpu][repl_entry].tag    = tag;
+    PAHT[cpu][repl_entry].id     = -1;
+    PAHT[cpu][repl_entry].init   = offset;
+    PAHT[cpu][repl_entry].second = 0;
+    PAHT[cpu][repl_entry].third  = 0;
+    PAHT[cpu][repl_entry].valid  = false;
+    PAHT[cpu][repl_entry].valid2 = false;
+    PAHT[cpu][repl_entry].valid3 = false;
     increase_lru_of_page_access_history_table(cpu, repl_entry);
   }
 
@@ -387,11 +484,11 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
 
     for (int pos = 0; pos < DEGREE; ++pos) {
       if (issue_prefetch(cpu, cl_address, pos, id)) {
+        // printf("Prefetch %d id %d\n", most_offsets[cpu][pos], id);
         uint64_t pf_addr = (cl_address + most_offsets[cpu][pos]) << LOG2_BLOCK_SIZE;
 
         if (id != -1) {
           prefetch_line(ip, addr, pf_addr, FILL_L2);
-
         } else {
           prefetch_line(ip, addr, pf_addr, FILL_LLC);
         }
@@ -404,4 +501,4 @@ void CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
 
 void CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr) {}
 
-void CACHE::l2c_prefetcher_final_stats() { cout << endl << "L2C PMOP Prefetcher final stats" << endl; }
+void CACHE::l2c_prefetcher_final_stats() { cout << endl << "L2C PMOP Prefetcher Page-ID with 3 Offsets final stats" << endl; }
