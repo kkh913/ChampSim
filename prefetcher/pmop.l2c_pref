@@ -2,6 +2,8 @@
 #include "bloom.h"
 #include "cache.h"
 
+// find git diff on remote 
+
 // Macros
 #define SAMEPAGE(lineaddr1, lineaddr2) ((((lineaddr1) ^ (lineaddr2)) >> 6) == 0)
 #define INCREMENT(x, n)  \
