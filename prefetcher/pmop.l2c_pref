@@ -2,6 +2,10 @@
 #include "bloom.h"
 #include "cache.h"
 
+#define MATPLOT
+#ifdef MATPLOT
+#endif
+
 // Macros
 #define SAMEPAGE(lineaddr1, lineaddr2) ((((lineaddr1) ^ (lineaddr2)) >> 6) == 0)
 #define INCREMENT(x, n)  \

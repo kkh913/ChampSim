@@ -7,3 +7,9 @@ bin/
 .DS_Store
 *.bk
 prefetcher/backup*
+.auto_cscope_ctags/
+GPATH
+GRTAGS
+GTAGS
+tags
+tags.files
